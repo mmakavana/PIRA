@@ -1,3 +1,9 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Print-friendly */
+@media print {
+  .no-print { display: none !important; }
+  body { background: white !important; }
+}
