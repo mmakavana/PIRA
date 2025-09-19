@@ -2,33 +2,23 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Brand header colors */
-:root {
-  --pira-primary: #261f62; /* dark blue-purple banner */
-  --pira-secondary: #2f2972; /* slightly lighter strip */
-  --pira-accent: #4f46e5; /* indigo for buttons */
-}
-
-html, body, #root { height: 100%; }
-
-.pira-header {
-  background: linear-gradient(180deg, var(--pira-primary) 0%, var(--pira-secondary) 100%);
-}
-
+/* Tabs rounded squares + header styling helpers */
 .pira-tab {
-  @apply rounded-2xl px-4 py-2 text-sm font-semibold text-white/85;
-  background-color: #2d296a;
+  @apply px-4 py-2 rounded-xl font-medium hover:bg-white/20 transition;
 }
-
-.pira-tab.active {
-  @apply bg-white text-[#1f1b55] shadow;
+.pira-tab-active {
+  @apply bg-white text-pira-purple;
+  border-radius: 12px;
 }
-
-.scrollbar-thin::-webkit-scrollbar { height: 10px; }
-.scrollbar-thin::-webkit-scrollbar-thumb { background: #c7c4f3; border-radius: 8px; }
-.scrollbar-thin::-webkit-scrollbar-track { background: #efeffd; }
-
-/* timeline grid */
-.tick {
-  @apply border-r border-slate-200;
+.pira-card {
+  @apply bg-white rounded-2xl shadow;
+}
+.pira-btn {
+  @apply px-3 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700 transition;
+}
+.pira-chip {
+  @apply inline-flex items-center px-2 py-0.5 rounded-xl text-xs bg-blue-100 text-blue-700;
+}
+.pira-input {
+  @apply border rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-blue-400;
 }
