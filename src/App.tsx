@@ -1,7 +1,5 @@
 import ProjectManagementApp from './ProjectManagementApp'
 
-function App() {
+export default function App() {
   return <ProjectManagementApp />
 }
-
-export default App
