@@ -2,8 +2,77 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Print-friendly */
-@media print {
-  .no-print { display: none !important; }
-  body { background: white !important; }
+/* Global tweaks */
+:root {
+  --px-per-day: 16; /* fixed width per day used by the timeline */
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  @apply font-ui text-slate-800 bg-pira-bg;
+}
+
+/* Header */
+.pira-header {
+  @apply bg-pira-header text-white;
+}
+
+.pira-band {
+  @apply bg-pira-band text-white;
+}
+
+/* Rounded tabs in nav */
+.pira-tab {
+  @apply inline-flex items-center gap-2 px-4 h-10 rounded-tab transition
+         bg-white/10 hover:bg-white/20;
+}
+.pira-tab.active {
+  @apply bg-white text-pira-header font-semibold shadow-soft;
+}
+
+/* Timeline container */
+.timeline-shell {
+  @apply w-full overflow-x-auto overflow-y-hidden rounded-card bg-white shadow-soft;
+}
+
+/* Sticky column for member names */
+.timeline-sticky {
+  position: sticky;
+  left: 0;
+  z-index: 10;
+  background: linear-gradient(to right, #ffffff 80%, rgba(255,255,255,0));
+}
+
+/* Read-only legend chips */
+.legend-chip {
+  @apply inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slate-100 text-slate-700 text-sm;
+}
+
+/* Utility for thin vertical lines (today & week ticks) */
+.vline {
+  @apply absolute top-0 bottom-0 border-l border-slate-400/70;
+}
+
+/* Weekend shading band */
+.weekend {
+  @apply absolute top-0 bottom-0 bg-slate-200/40;
+}
+
+/* Milestone symbol sizing */
+.m-small { width: 8px; height: 8px; }
+.m-medium { width: 12px; height: 12px; }
+.m-large { width: 16px; height: 16px; }
+
+/* Milestone shapes (SVG fallback with CSS) */
+.shape-diamond { transform: rotate(45deg); }
+.shape-square { }
+.shape-circle { border-radius: 9999px; }
+.shape-triangle {
+  width: 0; height: 0;
+  border-left: 7px solid transparent;
+  border-right: 7px solid transparent;
+  border-bottom: 14px solid currentColor;
 }
