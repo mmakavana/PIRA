@@ -1,1260 +1,997 @@
-import React, { useState, useRef } from 'react';
-import { Users, Plus, X, Settings, BarChart3, Calendar, Trash2 } from 'lucide-react';
+import React from 'react'
+import { CalendarDays, Users, UserCog, PlusCircle, Settings, BarChart3 } from 'lucide-react'
 
-// Simple input that manages its own state completely
-const SimpleInput = React.memo(({ initialValue, onSubmit, placeholder, className, type = "text" }) => {
-  const inputRef = useRef(null);
-  
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter' && onSubmit) {
-      onSubmit(e.target.value);
-      if (inputRef.current) {
-        inputRef.current.value = '';
-      }
-    }
-  };
+/* ========== Types ========== */
+
+type UUID = string
+
+type MilestoneType = {
+  id: UUID
+  name: string
+  shape: 'diamond' | 'circle' | 'triangle' | 'square'
+  color: string
+  size: 'small' | 'medium' | 'large'
+}
+
+type Milestone = {
+  id: UUID
+  typeId: UUID
+  date: string // ISO date (yyyy-mm-dd)
+  label?: string
+}
+
+type Project = {
+  id: UUID
+  name: string
+  description?: string
+  priority: number // 1 highest
+  status: string
+  start: string
+  due: string
+  milestones: Milestone[]
+  assigneeIds: string[] // teamId:memberName IDs
+  barColor?: string
+  history?: { ts: string; field: string; oldVal: string; newVal: string }[]
+}
+
+type Team = {
+  id: UUID
+  name: string
+  members: string[] // names only; id will be teamId:name
+}
+
+type SettingsState = {
+  defaultBarColor: string
+  weekStartsOnSunday: boolean
+  todayLine: boolean
+  weekendShading: boolean
+  snapToGrid: boolean
+  executiveMode: boolean
+  timeScale: 'days' | 'weeks' | 'months' | 'quarters' | 'years'
+}
+
+/* ========== Utilities ========== */
+
+const ONE_DAY = 24 * 60 * 60 * 1000
+const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36)
+
+const toISO = (d: Date) => {
+  const dt = new Date(d)
+  dt.setHours(0, 0, 0, 0)
+  return dt.toISOString().slice(0, 10)
+}
+
+const fromISO = (s: string) => {
+  const d = new Date(s)
+  d.setHours(0, 0, 0, 0)
+  return d
+}
+
+const clamp = (x: number, min: number, max: number) => Math.max(min, Math.min(max, x))
+
+function formatMMDD(d: Date) {
+  return d.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' })
+}
+
+/* ========== Persistence (localStorage for MVP) ========== */
+
+const STORAGE_KEY = 'pira-data-v1'
+type DataShape = {
+  teams: Team[]
+  projects: Project[]
+  milestoneTypes: MilestoneType[]
+  settings: SettingsState
+}
+
+function loadData(): DataShape {
+  const raw = localStorage.getItem(STORAGE_KEY)
+  if (raw) {
+    try {
+      return JSON.parse(raw)
+    } catch {}
+  }
+  // Seed with starter
+  return {
+    teams: [
+      { id: uid(), name: 'Development', members: ['John', 'Sarah', 'Mike'] },
+      { id: uid(), name: 'QA', members: ['Priya', 'Tom'] },
+      { id: uid(), name: 'DevOps', members: ['Alex'] },
+    ],
+    projects: [],
+    milestoneTypes: [
+      { id: uid(), name: 'Start Date', shape: 'diamond', color: '#10B981', size: 'small' },
+      { id: uid(), name: 'Due Date', shape: 'diamond', color: '#EF4444', size: 'small' },
+      { id: uid(), name: 'Stabilization', shape: 'diamond', color: '#3B82F6', size: 'medium' },
+      { id: uid(), name: 'Complete', shape: 'diamond', color: '#10B981', size: 'medium' },
+    ],
+    settings: {
+      defaultBarColor: '#5B6BFF',
+      weekStartsOnSunday: true,
+      todayLine: true,
+      weekendShading: true,
+      snapToGrid: true,
+      executiveMode: false,
+      timeScale: 'weeks',
+    },
+  }
+}
+
+function saveData(data: DataShape) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
+}
+
+/* ========== SVG Shapes ========== */
+
+function Shape({ shape, color, size }: { shape: MilestoneType['shape']; color: string; size: MilestoneType['size'] }) {
+  const px = size === 'small' ? 8 : size === 'medium' ? 12 : 16
+  const half = px / 2
+  const common = { fill: color, stroke: 'rgba(0,0,0,0.3)', strokeWidth: 1 }
+  if (shape === 'circle') return <circle cx={half} cy={half} r={half - 1} {...common} />
+  if (shape === 'square') return <rect x="1" y="1" width={px - 2} height={px - 2} rx="2" {...common} />
+  if (shape === 'triangle') return <polygon points={`${half},1 ${px - 1},${px - 1} 1,${px - 1}`} {...common} />
+  // diamond
+  return <polygon points={`${half},1 ${px - 1},${half} ${half},${px - 1} 1,${half}`} {...common} />
+}
+
+function ShapeIcon(props: React.ComponentProps<typeof Shape>) {
+  const px = props.size === 'small' ? 8 : props.size === 'medium' ? 12 : 16
+  return (
+    <svg width={px} height={px} className="inline-block align-middle">
+      <Shape {...props} />
+    </svg>
+  )
+}
+
+/* ========== Header & Tabs ========== */
+
+type Tab = 'unified' | 'teams' | 'projects' | 'reports'
+
+function Header({ active, setActive }: { active: Tab; setActive: (t: Tab) => void }) {
+  const tab = (id: Tab, label: string, Icon: any) => (
+    <button
+      onClick={() => setActive(id)}
+      className={`flex items-center gap-2 px-4 py-2 rounded-xl border transition
+        ${active === id ? 'bg-white text-pira-purple border-white shadow'
+        : 'bg-[#31297A] text-white/90 border-transparent hover:bg-[#3B338F]'}`}
+    >
+      <Icon size={18} />
+      <span className="font-semibold">{label}</span>
+    </button>
+  )
 
   return (
-    <input
-      ref={inputRef}
-      type={type}
-      defaultValue={initialValue || ''}
-      placeholder={placeholder}
-      className={className}
-      onKeyDown={handleKeyDown}
-    />
-  );
-});
-
-const ProjectManagementApp = () => {
-  // Core state management
-  const [activeTab, setActiveTab] = useState('unified');
-  const [teams, setTeams] = useState([
-    { id: 1, name: 'Development', members: ['John', 'Sarah', 'Mike'] },
-    { id: 2, name: 'QA', members: ['Lisa', 'Tom'] },
-    { id: 3, name: 'DevOps', members: ['Alex', 'Emma'] }
-  ]);
-  const [projects, setProjects] = useState([]);
-  const [showExecutiveMode, setShowExecutiveMode] = useState(false);
-  
-  // Timeline view settings
-  const [timelineView, setTimelineView] = useState('weeks'); // days, weeks, months
-  const [timelineStartDate, setTimelineStartDate] = useState(() => {
-    const date = new Date();
-    date.setMonth(date.getMonth() - 1);
-    return date;
-  });
-  const [timelineEndDate, setTimelineEndDate] = useState(() => {
-    const date = new Date();
-    date.setMonth(date.getMonth() + 6);
-    return date;
-  });
-  
-  // Project management
-  const [showAddProject, setShowAddProject] = useState(false);
-  const [editingProject, setEditingProject] = useState(null);
-  const [editingTeamName, setEditingTeamName] = useState({});
-  const [editingMemberName, setEditingMemberName] = useState({});
-  
-  // Status options
-  const statusOptions = [
-    { name: 'In Progress', color: '#3B82F6' },
-    { name: 'Stabilization', color: '#F59E0B' },
-    { name: 'On Hold', color: '#EF4444' },
-    { name: 'Complete', color: '#10B981' }
-  ];
-
-  // Shape and color options for milestones
-  const shapeOptions = ['diamond', 'circle', 'triangle', 'square', 'star'];
-  const colorOptions = [
-    '#3B82F6', // Blue
-    '#EF4444', // Red
-    '#10B981', // Green
-    '#F59E0B', // Amber
-    '#8B5CF6', // Purple
-    '#EC4899', // Pink
-    '#06B6D4', // Cyan
-    '#84CC16', // Lime
-    '#F97316', // Orange
-    '#6366F1', // Indigo
-    '#14B8A6', // Teal
-    '#F43F5E', // Rose
-    '#A855F7', // Violet
-    '#22C55E', // Emerald
-    '#EAB308', // Yellow
-    '#64748B', // Slate
-    '#78716C', // Stone
-    '#DC2626', // Red-600
-    '#059669', // Emerald-600
-    '#7C3AED', // Violet-600
-    '#DB2777', // Pink-600
-    '#0891B2', // Cyan-600
-    '#65A30D', // Lime-600
-    '#EA580C', // Orange-600
-    '#4F46E5', // Indigo-600
-    '#0D9488', // Teal-600
-    '#BE185D', // Pink-700
-    '#7C2D12', // Orange-900
-    '#1E293B', // Slate-800
-    '#374151'  // Gray-700
-  ];
-
-  // Update team name
-  const updateTeamName = (teamId, newName) => {
-    if (newName.trim()) {
-      setTeams(teams.map(team => 
-        team.id === teamId 
-          ? { ...team, name: newName.trim() }
-          : team
-      ));
-      setEditingTeamName(prev => ({ ...prev, [teamId]: false }));
-    }
-  };
-
-  // Update member name
-  const updateMemberName = (teamId, oldName, newName) => {
-    if (newName.trim()) {
-      setTeams(teams.map(team => 
-        team.id === teamId 
-          ? { 
-              ...team, 
-              members: team.members.map(member => 
-                member === oldName ? newName.trim() : member
-              ) 
-            }
-          : team
-      ));
-      setEditingMemberName(prev => ({ ...prev, [`${teamId}-${oldName}`]: false }));
-    }
-  };
-
-  // Generate team tabs dynamically
-  const teamTabs = teams.map(team => ({
-    id: team.name.toLowerCase().replace(/\s+/g, '-'),
-    label: team.name,
-    teamId: team.id
-  }));
-
-  // Add new team
-  const addTeam = (teamName) => {
-    if (teamName && teamName.trim()) {
-      const newTeam = {
-        id: Date.now(),
-        name: teamName.trim(),
-        members: []
-      };
-      setTeams(prev => [...prev, newTeam]);
-    }
-  };
-
-  // Delete team
-  const deleteTeam = (teamId) => {
-    setTeams(teams.filter(team => team.id !== teamId));
-  };
-
-  // Add member to team
-  const addMemberToTeam = (teamId, memberName) => {
-    if (memberName && memberName.trim()) {
-      setTeams(teams.map(team => 
-        team.id === teamId 
-          ? { ...team, members: [...team.members, memberName.trim()] }
-          : team
-      ));
-    }
-  };
-
-  // Remove member from team
-  const removeMemberFromTeam = (teamId, memberName) => {
-    setTeams(teams.map(team => 
-      team.id === teamId 
-        ? { ...team, members: team.members.filter(member => member !== memberName) }
-        : team
-    ));
-  };
-
-  // Get all members across all teams
-  const getAllMembers = () => {
-    return teams.flatMap(team => 
-      team.members.map(member => ({
-        name: member,
-        teamId: team.id,
-        teamName: team.name
-      }))
-    );
-  };
-  const generateTimelineColumns = () => {
-    const columns = [];
-    const start = new Date(timelineStartDate);
-    const end = new Date(timelineEndDate);
-    
-    if (timelineView === 'days') {
-      for (let date = new Date(start); date <= end; date.setDate(date.getDate() + 1)) {
-        columns.push({
-          date: new Date(date),
-          label: date.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' }),
-          width: 30
-        });
-      }
-    } else if (timelineView === 'weeks') {
-      const startOfWeek = new Date(start);
-      startOfWeek.setDate(start.getDate() - start.getDay());
-      
-      for (let date = new Date(startOfWeek); date <= end; date.setDate(date.getDate() + 7)) {
-        columns.push({
-          date: new Date(date),
-          label: date.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' }),
-          width: 80
-        });
-      }
-    } else { // months
-      for (let date = new Date(start.getFullYear(), start.getMonth(), 1); date <= end; date.setMonth(date.getMonth() + 1)) {
-        columns.push({
-          date: new Date(date),
-          label: date.toLocaleDateString('en-US', { month: 'short', year: '2-digit' }),
-          width: 120
-        });
-      }
-    }
-    return columns;
-  };
-
-  const calculateProjectPosition = (project, columns) => {
-    const startDate = new Date(project.startDate);
-    const endDate = new Date(project.dueDate);
-    const timelineStart = columns[0]?.date || startDate;
-    const timelineEnd = columns[columns.length - 1]?.date || endDate;
-    
-    // Calculate total timeline width in pixels
-    const totalWidth = columns.reduce((sum, col) => sum + col.width, 0);
-    
-    // Calculate position based on actual dates
-    const totalTimespan = timelineEnd.getTime() - timelineStart.getTime();
-    const projectStart = Math.max(0, startDate.getTime() - timelineStart.getTime());
-    const projectDuration = endDate.getTime() - startDate.getTime();
-    
-    // Convert to percentages
-    const leftPercent = totalTimespan > 0 ? (projectStart / totalTimespan) * 100 : 0;
-    const widthPercent = totalTimespan > 0 ? (projectDuration / totalTimespan) * 100 : 2;
-    
-    return { 
-      left: `${Math.max(0, leftPercent)}%`, 
-      width: `${Math.max(2, Math.min(widthPercent, 100 - leftPercent))}%` 
-    };
-  };
-
-  const renderShape = (shape, color, size = 12) => {
-    const shapeProps = {
-      width: size,
-      height: size,
-      fill: color,
-      stroke: '#000',
-      strokeWidth: 1
-    };
-
-    switch (shape) {
-      case 'diamond':
-        return (
-          <svg width={size} height={size} className="inline-block">
-            <polygon points={`${size/2},2 ${size-2},${size/2} ${size/2},${size-2} 2,${size/2}`} {...shapeProps} />
-          </svg>
-        );
-      case 'circle':
-        return (
-          <svg width={size} height={size} className="inline-block">
-            <circle cx={size/2} cy={size/2} r={size/2-1} {...shapeProps} />
-          </svg>
-        );
-      case 'triangle':
-        return (
-          <svg width={size} height={size} className="inline-block">
-            <polygon points={`${size/2},2 ${size-2},${size-2} 2,${size-2}`} {...shapeProps} />
-          </svg>
-        );
-      case 'square':
-        return (
-          <svg width={size} height={size} className="inline-block">
-            <rect x="2" y="2" width={size-4} height={size-4} {...shapeProps} />
-          </svg>
-        );
-      case 'star':
-        return (
-          <svg width={size} height={size} className="inline-block">
-            <polygon points={`${size/2},2 ${size*0.6},${size*0.4} ${size-2},${size*0.4} ${size*0.7},${size*0.65} ${size*0.8},${size-2} ${size/2},${size*0.75} ${size*0.2},${size-2} ${size*0.3},${size*0.65} 2,${size*0.4} ${size*0.4},${size*0.4}`} {...shapeProps} />
-          </svg>
-        );
-      default:
-        return <div style={{width: size, height: size, backgroundColor: color, borderRadius: '50%'}} className="inline-block" />;
-    }
-  };
-
-  // Add/Update project from form
-  const saveProjectFromForm = () => {
-    const form = document.getElementById('projectForm');
-    const formData = new FormData(form);
-    
-    const projectData = {
-      id: editingProject ? editingProject.id : Date.now(),
-      name: formData.get('name'),
-      description: formData.get('description'),
-      priority: formData.get('priority'),
-      startDate: formData.get('startDate'),
-      dueDate: formData.get('dueDate'),
-      stabilizationDate: formData.get('stabilizationDate'),
-      completionDate: formData.get('completionDate'),
-      status: formData.get('status'),
-      assignedMembers: formData.getAll('assignedMembers'),
-      // Visual settings
-      projectColor: formData.get('projectColor') || '#3B82F6',
-      startDateShape: formData.get('startDateShape') || 'diamond',
-      startDateColor: formData.get('startDateColor') || '#10B981',
-      dueDateShape: formData.get('dueDateShape') || 'diamond', 
-      dueDateColor: formData.get('dueDateColor') || '#EF4444',
-      // Milestones
-      milestones: editingProject ? editingProject.milestones || [] : [],
-      dueDateHistory: editingProject ? editingProject.dueDateHistory : [
-        { date: formData.get('dueDate'), changedOn: new Date().toISOString(), reason: 'Initial date' }
-      ]
-    };
-
-    if (!projectData.name || !projectData.startDate || !projectData.dueDate) {
-      alert('Please fill in required fields: Name, Start Date, and Due Date');
-      return;
-    }
-
-    if (editingProject) {
-      setProjects(projects.map(p => p.id === editingProject.id ? projectData : p));
-    } else {
-      setProjects(prev => [...prev, projectData]);
-    }
-
-    setShowAddProject(false);
-    setEditingProject(null);
-    form.reset();
-  };
-
-  // Add milestone to project
-  const addMilestone = (projectId, milestone) => {
-    setProjects(projects.map(project => 
-      project.id === projectId 
-        ? { 
-            ...project, 
-            milestones: [...(project.milestones || []), { 
-              id: Date.now(), 
-              ...milestone 
-            }] 
-          }
-        : project
-    ));
-  };
-
-  // Remove milestone from project
-  const removeMilestone = (projectId, milestoneId) => {
-    setProjects(projects.map(project => 
-      project.id === projectId 
-        ? { 
-            ...project, 
-            milestones: (project.milestones || []).filter(m => m.id !== milestoneId) 
-          }
-        : project
-    ));
-  };
-
-  // Delete project
-  const deleteProject = (projectId) => {
-    if (window.confirm('Are you sure you want to delete this project?')) {
-      setProjects(projects.filter(p => p.id !== projectId));
-    }
-  };
-
-  // Start editing project
-  const startEditProject = (project) => {
-    setEditingProject(project);
-    setShowAddProject(true);
-  };
-
-  // Team Management Component
-  const TeamManagement = () => (
-    <div className="p-6 max-w-6xl mx-auto">
-      <div className="flex justify-between items-center mb-6">
-        <h2 className="text-2xl font-bold text-gray-800">Team Management</h2>
-        <div className="flex items-center gap-4">
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={showExecutiveMode}
-              onChange={(e) => setShowExecutiveMode(e.target.checked)}
-              className="rounded"
-            />
-            <span className="text-sm font-medium">Executive Mode (Hide Names)</span>
-          </label>
+    <div className="shadow">
+      <div className="bg-pira-purple text-white">
+        <div className="max-w-6xl mx-auto px-4 py-5">
+          <h1 className="text-3xl font-bold tracking-wide">PIRA</h1>
+          <p className="text-white/90 -mt-1">Project IT Resource Availability</p>
         </div>
       </div>
-
-      {/* Add New Team */}
-      <div className="bg-white rounded-lg shadow-md p-6 mb-6">
-        <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
-          <Plus className="w-5 h-5" />
-          Add New Team
-        </h3>
-        <div className="flex gap-3">
-          <SimpleInput
-            placeholder="Team name"
-            onSubmit={addTeam}
-            className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
-          <button
-            onClick={() => {
-              const input = document.querySelector('input[placeholder="Team name"]');
-              if (input && input.value.trim()) {
-                addTeam(input.value);
-                input.value = '';
-              }
-            }}
-            className="px-4 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600 transition-colors"
-          >
-            Add Team
-          </button>
+      <div className="bg-[#2A246F]">
+        <div className="max-w-6xl mx-auto px-4 py-3 flex gap-2 overflow-x-auto">
+          {tab('unified', 'Unified View', CalendarDays)}
+          {tab('teams', 'Teams', Users)}
+          {tab('projects', 'Projects', PlusCircle)}
+          {tab('reports', 'Reports', BarChart3)}
         </div>
       </div>
+    </div>
+  )
+}
 
-      {/* Teams List */}
-      <div className="grid gap-6">
-        {teams.map(team => (
-          <div key={team.id} className="bg-white rounded-lg shadow-md p-6">
-            <div className="flex justify-between items-center mb-4">
-              {editingTeamName[team.id] ? (
-                <input
-                  type="text"
-                  defaultValue={team.name}
-                  onBlur={(e) => updateTeamName(team.id, e.target.value)}
-                  onKeyPress={(e) => {
-                    if (e.key === 'Enter') {
-                      updateTeamName(team.id, e.target.value);
-                    }
-                    if (e.key === 'Escape') {
-                      setEditingTeamName(prev => ({ ...prev, [team.id]: false }));
-                    }
-                  }}
-                  className="text-lg font-semibold text-gray-800 border border-gray-300 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  autoFocus
-                />
-              ) : (
-                <h3 
-                  className="text-lg font-semibold text-gray-800 cursor-pointer hover:text-blue-600"
-                  onClick={() => setEditingTeamName(prev => ({ ...prev, [team.id]: true }))}
-                  title="Click to edit team name"
-                >
-                  {team.name}
-                </h3>
-              )}
-              <button
-                onClick={() => deleteTeam(team.id)}
-                className="text-red-500 hover:text-red-700 transition-colors"
-                title="Delete Team"
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>
+/* ========== Legend Manager ========== */
+
+function LegendManager({
+  milestoneTypes,
+  setMilestoneTypes,
+  settings,
+  setSettings
+}: {
+  milestoneTypes: MilestoneType[]
+  setMilestoneTypes: (f: (prev: MilestoneType[]) => MilestoneType[]) => void
+  settings: SettingsState
+  setSettings: (s: SettingsState) => void
+}) {
+  const updateType = (id: UUID, patch: Partial<MilestoneType>) => {
+    setMilestoneTypes(prev => prev.map(mt => mt.id === id ? { ...mt, ...patch } : mt))
+  }
+  const removeType = (id: UUID) => setMilestoneTypes(prev => prev.filter(mt => mt.id !== id))
+  const addType = () => setMilestoneTypes(prev => [...prev, { id: uid(), name: 'New Type', shape: 'diamond', color: '#6366F1', size: 'small' }])
+
+  return (
+    <div className="bg-white rounded-xl shadow p-4 space-y-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-lg font-semibold">Legend: Milestone Types</h3>
+        <button className="px-3 py-1 bg-pira-accent text-white rounded" onClick={addType}>+ Add Type</button>
+      </div>
+
+      <div className="space-y-3">
+        {milestoneTypes.map(mt => (
+          <div key={mt.id} className="grid md:grid-cols-6 grid-cols-2 items-center gap-2 border rounded-lg p-3">
+            <div className="col-span-2">
+              <label className="text-xs text-gray-500">Name</label>
+              <input className="w-full border rounded px-2 py-1" value={mt.name}
+                onChange={e => updateType(mt.id, { name: e.target.value })} />
             </div>
 
-            {/* Team Members */}
-            <div className="mb-4">
-              <h4 className="font-medium text-gray-700 mb-2">Members:</h4>
-              <div className="flex flex-wrap gap-2">
-                {team.members.map(member => (
-                  <span
-                    key={member}
-                    className="inline-flex items-center gap-1 px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-sm"
-                  >
-                    {editingMemberName[`${team.id}-${member}`] ? (
-                      <input
-                        type="text"
-                        defaultValue={member}
-                        onBlur={(e) => updateMemberName(team.id, member, e.target.value)}
-                        onKeyPress={(e) => {
-                          if (e.key === 'Enter') {
-                            updateMemberName(team.id, member, e.target.value);
-                          }
-                          if (e.key === 'Escape') {
-                            setEditingMemberName(prev => ({ ...prev, [`${team.id}-${member}`]: false }));
-                          }
-                        }}
-                        className="bg-white border border-gray-300 rounded px-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-                        autoFocus
-                      />
-                    ) : (
-                      <span 
-                        className="cursor-pointer hover:text-blue-900"
-                        onClick={() => setEditingMemberName(prev => ({ ...prev, [`${team.id}-${member}`]: true }))}
-                        title="Click to edit member name"
-                      >
-                        {showExecutiveMode ? 'Member' : member}
-                      </span>
-                    )}
-                    <button
-                      onClick={() => removeMemberFromTeam(team.id, member)}
-                      className="text-blue-600 hover:text-blue-800"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  </span>
-                ))}
-                {team.members.length === 0 && (
-                  <span className="text-gray-500 italic">No members assigned</span>
-                )}
-              </div>
+            <div>
+              <label className="text-xs text-gray-500">Shape</label>
+              <select className="w-full border rounded px-2 py-1" value={mt.shape}
+                onChange={e => updateType(mt.id, { shape: e.target.value as any })}>
+                <option value="diamond">diamond</option>
+                <option value="circle">circle</option>
+                <option value="triangle">triangle</option>
+                <option value="square">square</option>
+              </select>
             </div>
 
-            {/* Add Member */}
-            <div className="flex gap-3">
-              <SimpleInput
-                placeholder="New member name"
-                onSubmit={(value) => addMemberToTeam(team.id, value)}
-                className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-              <button
-                onClick={() => {
-                  const input = event.target.closest('.flex').querySelector('input[placeholder="New member name"]');
-                  if (input && input.value.trim()) {
-                    addMemberToTeam(team.id, input.value.trim());
-                    input.value = '';
-                  }
-                }}
-                className="px-4 py-2 bg-green-500 text-white rounded-md hover:bg-green-600 transition-colors"
-              >
-                Add Member
-              </button>
+            <div>
+              <label className="text-xs text-gray-500">Size</label>
+              <select className="w-full border rounded px-2 py-1" value={mt.size}
+                onChange={e => updateType(mt.id, { size: e.target.value as any })}>
+                <option value="small">small</option>
+                <option value="medium">medium</option>
+                <option value="large">large</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="text-xs text-gray-500">Color</label>
+              <input className="w-full border rounded h-9" type="color" value={mt.color}
+                onChange={e => updateType(mt.id, { color: e.target.value })} />
+            </div>
+
+            <div className="flex items-center gap-2">
+              <ShapeIcon shape={mt.shape} color={mt.color} size={mt.size} />
+              <button className="text-red-600 text-sm" onClick={() => removeType(mt.id)}>Delete</button>
             </div>
           </div>
         ))}
       </div>
-    </div>
-  );
 
-  // Project Management Component
-  const ProjectManagement = () => (
-    <div className="p-6 max-w-6xl mx-auto">
-      <div className="flex justify-between items-center mb-6">
-        <h2 className="text-2xl font-bold text-gray-800">Project Management</h2>
-        <button
-          onClick={() => setShowAddProject(true)}
-          className="px-4 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600 transition-colors flex items-center gap-2"
-        >
-          <Plus className="w-4 h-4" />
-          Add Project
-        </button>
+      <div className="grid md:grid-cols-4 sm:grid-cols-2 gap-3 pt-3 border-t">
+        <div>
+          <label className="text-xs text-gray-500">Default Project Bar Color</label>
+          <input type="color" className="w-full h-10 border rounded" value={settings.defaultBarColor}
+            onChange={e => setSettings({ ...settings, defaultBarColor: e.target.value })} />
+        </div>
+
+        <Toggle label="Executive Mode" value={settings.executiveMode}
+          onChange={v => setSettings({ ...settings, executiveMode: v })} />
+        <Toggle label="Show Today Line" value={settings.todayLine}
+          onChange={v => setSettings({ ...settings, todayLine: v })} />
+        <Toggle label="Weekend Shading" value={settings.weekendShading}
+          onChange={v => setSettings({ ...settings, weekendShading: v })} />
+        <Toggle label="Snap to Grid" value={settings.snapToGrid}
+          onChange={v => setSettings({ ...settings, snapToGrid: v })} />
+      </div>
+    </div>
+  )
+}
+
+function Toggle({ label, value, onChange }: { label: string; value: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <label className="flex items-center gap-2 text-sm select-none">
+      <input type="checkbox" checked={value} onChange={e => onChange(e.target.checked)} />
+      {label}
+    </label>
+  )
+}
+
+/* ========== Project Forms ========== */
+
+function ProjectForm({
+  teams, milestoneTypes, settings, onSave, initial
+}: {
+  teams: Team[]
+  milestoneTypes: MilestoneType[]
+  settings: SettingsState
+  onSave: (p: Project) => void
+  initial?: Project
+}) {
+  const [name, setName] = React.useState(initial?.name || '')
+  const [priority, setPriority] = React.useState(initial?.priority ?? 3)
+  const [status, setStatus] = React.useState(initial?.status || 'In Progress')
+  const [start, setStart] = React.useState(initial?.start || toISO(new Date()))
+  const [due, setDue] = React.useState(initial?.due || toISO(new Date(Date.now() + 14 * ONE_DAY)))
+  const [assignees, setAssignees] = React.useState<string[]>(initial?.assigneeIds || [])
+  const [barColor, setBarColor] = React.useState<string>(initial?.barColor || '')
+  const [milestones, setMilestones] = React.useState<Milestone[]>(initial?.milestones || [])
+
+  const allMembers = React.useMemo(() =>
+    teams.flatMap(t => t.members.map(m => ({ id: `${t.id}:${m}`, teamName: t.name, name: m }))), [teams])
+
+  const addMilestone = () => setMilestones(prev => [...prev, {
+    id: uid(), typeId: milestoneTypes[0]?.id || uid(), date: toISO(new Date())
+  }])
+
+  const updateMilestone = (id: string, patch: Partial<Milestone>) =>
+    setMilestones(prev => prev.map(m => m.id === id ? { ...m, ...patch } : m))
+
+  const removeMilestone = (id: string) => setMilestones(prev => prev.filter(m => m.id !== id))
+
+  const submit = () => {
+    if (new Date(due) < new Date(start)) {
+      alert('Warning: Due date is earlier than Start date.')
+    }
+    const p: Project = {
+      id: initial?.id || uid(),
+      name,
+      priority,
+      status,
+      start, due,
+      assigneeIds: assignees,
+      barColor: barColor || undefined,
+      milestones,
+      history: initial?.history || []
+    }
+    if (initial && initial.due !== due) {
+      p.history = [...(p.history || []), { ts: new Date().toISOString(), field: 'due', oldVal: initial.due, newVal: due }]
+    }
+    onSave(p)
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="grid sm:grid-cols-3 gap-3">
+        <div>
+          <label className="text-xs text-gray-500">Name</label>
+          <input className="w-full border rounded px-2 py-1" value={name} onChange={e => setName(e.target.value)} />
+        </div>
+        <div>
+          <label className="text-xs text-gray-500">Priority (1 highest)</label>
+          <input type="number" min={1} max={99} className="w-full border rounded px-2 py-1" value={priority}
+            onChange={e => setPriority(parseInt(e.target.value || '1'))} />
+        </div>
+        <div>
+          <label className="text-xs text-gray-500">Status</label>
+          <select className="w-full border rounded px-2 py-1" value={status} onChange={e => setStatus(e.target.value)}>
+            <option>In Progress</option><option>Stabilization</option><option>On Hold</option><option>Complete</option>
+          </select>
+        </div>
+        <div>
+          <label className="text-xs text-gray-500">Start</label>
+          <input type="date" className="w-full border rounded px-2 py-1" value={start} onChange={e => setStart(e.target.value)} />
+        </div>
+        <div>
+          <label className="text-xs text-gray-500">Due</label>
+          <input type="date" className="w-full border rounded px-2 py-1" value={due} onChange={e => setDue(e.target.value)} />
+        </div>
+        <div>
+          <label className="text-xs text-gray-500">Bar Color (override)</label>
+          <input type="color" className="w-full h-9 border rounded" value={barColor || settings.defaultBarColor}
+            onChange={e => setBarColor(e.target.value)} />
+        </div>
       </div>
 
-      {/* Add/Edit Project Form */}
-      {showAddProject && (
-        <div className="bg-white rounded-lg shadow-md p-6 mb-6">
-          <h3 className="text-lg font-semibold mb-4">
-            {editingProject ? 'Edit Project' : 'Add New Project'}
-          </h3>
-          
-          <form id="projectForm" className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {/* Project Name */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Project Name *
-              </label>
-              <input
-                name="name"
-                type="text"
-                defaultValue={editingProject?.name || ''}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder="Enter project name"
-                required
-              />
-            </div>
+      <div>
+        <label className="text-xs text-gray-500">Assigned Members</label>
+        <select multiple className="w-full border rounded px-2 py-2 h-28"
+          value={assignees} onChange={e => {
+            const options = Array.from(e.target.selectedOptions).map(o => o.value)
+            setAssignees(options)
+          }}>
+          {allMembers.map(m => (
+            <option key={m.id} value={m.id}>{m.name} ({m.teamName})</option>
+          ))}
+        </select>
+      </div>
 
-            {/* Priority */}
+      <div className="bg-gray-50 rounded-lg p-3 space-y-2">
+        <div className="flex items-center justify-between">
+          <h4 className="font-semibold">Milestones</h4>
+          <button className="px-3 py-1 bg-pira-accent text-white rounded" onClick={addMilestone}>+ Add Milestone</button>
+        </div>
+        {milestones.length === 0 && <p className="text-sm text-gray-500">No milestones yet.</p>}
+        {milestones.map(m => (
+          <div key={m.id} className="grid md:grid-cols-4 gap-2 items-end">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Priority
-              </label>
-              <input
-                name="priority"
-                type="number"
-                defaultValue={editingProject?.priority || ''}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder="e.g. 1, 2, 3..."
-              />
-            </div>
-
-            {/* Start Date */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Start Date *
-              </label>
-              <input
-                name="startDate"
-                type="date"
-                defaultValue={editingProject?.startDate || ''}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                required
-              />
-            </div>
-
-            {/* Due Date */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Due Date *
-              </label>
-              <input
-                name="dueDate"
-                type="date"
-                defaultValue={editingProject?.dueDate || ''}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                required
-              />
-            </div>
-
-            {/* Stabilization Date */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Stabilization Date
-              </label>
-              <input
-                name="stabilizationDate"
-                type="date"
-                defaultValue={editingProject?.stabilizationDate || ''}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
-
-            {/* Completion Date */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Completion Date
-              </label>
-              <input
-                name="completionDate"
-                type="date"
-                defaultValue={editingProject?.completionDate || ''}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
-
-            {/* Status */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Status
-              </label>
-              <select
-                name="status"
-                defaultValue={editingProject?.status || 'In Progress'}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                {statusOptions.map(status => (
-                  <option key={status.name} value={status.name}>
-                    {status.name}
-                  </option>
-                ))}
+              <label className="text-xs text-gray-500">Type</label>
+              <select className="w-full border rounded px-2 py-1" value={m.typeId}
+                onChange={e => updateMilestone(m.id, { typeId: e.target.value })}>
+                {milestoneTypes.map(mt => <option key={mt.id} value={mt.id}>{mt.name}</option>)}
               </select>
             </div>
-
-            {/* Assigned Members */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Assigned Members
-              </label>
-              <select
-                name="assignedMembers"
-                multiple
-                defaultValue={editingProject?.assignedMembers || []}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 h-24"
-              >
-                {getAllMembers().map(member => (
-                  <option key={`${member.teamId}-${member.name}`} value={member.name}>
-                    {member.name} ({member.teamName})
-                  </option>
-                ))}
-              </select>
-              <p className="text-xs text-gray-500 mt-1">Hold Ctrl/Cmd to select multiple members</p>
+              <label className="text-xs text-gray-500">Date</label>
+              <input type="date" className="w-full border rounded px-2 py-1" value={m.date}
+                onChange={e => updateMilestone(m.id, { date: e.target.value })} />
             </div>
-
-            {/* Project Bar Color */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Project Bar Color
-              </label>
-              <select
-                name="projectColor"
-                defaultValue={editingProject?.projectColor || '#3B82F6'}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                {colorOptions.map(color => (
-                  <option key={color} value={color} style={{ backgroundColor: color, color: 'white' }}>
-                    {color}
-                  </option>
-                ))}
-              </select>
+              <label className="text-xs text-gray-500">Label (optional)</label>
+              <input className="w-full border rounded px-2 py-1" value={m.label || ''}
+                onChange={e => updateMilestone(m.id, { label: e.target.value })} />
             </div>
-
-            {/* Start Date Marker */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Start Date Marker
-              </label>
-              <div className="flex gap-2">
-                <select
-                  name="startDateShape"
-                  defaultValue={editingProject?.startDateShape || 'diamond'}
-                  className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  {shapeOptions.map(shape => (
-                    <option key={shape} value={shape}>
-                      {shape.charAt(0).toUpperCase() + shape.slice(1)}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  name="startDateColor"
-                  defaultValue={editingProject?.startDateColor || '#10B981'}
-                  className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  {colorOptions.map(color => (
-                    <option key={color} value={color} style={{ backgroundColor: color, color: 'white' }}>
-                      {color}
-                    </option>
-                  ))}
-                </select>
-              </div>
+            <div className="flex items-center gap-3">
+              <PreviewMilestone milestone={m} types={milestoneTypes} />
+              <button className="text-red-600 text-sm" onClick={() => removeMilestone(m.id)}>Delete</button>
             </div>
-
-            {/* Due Date Marker */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Due Date Marker
-              </label>
-              <div className="flex gap-2">
-                <select
-                  name="dueDateShape"
-                  defaultValue={editingProject?.dueDateShape || 'diamond'}
-                  className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  {shapeOptions.map(shape => (
-                    <option key={shape} value={shape}>
-                      {shape.charAt(0).toUpperCase() + shape.slice(1)}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  name="dueDateColor"
-                  defaultValue={editingProject?.dueDateColor || '#EF4444'}
-                  className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  {colorOptions.map(color => (
-                    <option key={color} value={color} style={{ backgroundColor: color, color: 'white' }}>
-                      {color}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            {/* Description - Full Width */}
-            <div className="md:col-span-2">
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Description
-              </label>
-              <textarea
-                name="description"
-                defaultValue={editingProject?.description || ''}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                rows={3}
-                placeholder="Enter project description"
-              />
-            </div>
-
-            {/* Milestones Section - Full Width */}
-            {editingProject && (
-              <div className="md:col-span-2">
-                <div className="flex justify-between items-center mb-2">
-                  <label className="block text-sm font-medium text-gray-700">
-                    Milestones
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const name = prompt('Milestone name:');
-                      const date = prompt('Milestone date (YYYY-MM-DD):');
-                      if (name && date) {
-                        addMilestone(editingProject.id, {
-                          name,
-                          date,
-                          shape: 'diamond',
-                          color: '#F59E0B'
-                        });
-                      }
-                    }}
-                    className="px-3 py-1 bg-blue-500 text-white text-sm rounded hover:bg-blue-600"
-                  >
-                    Add Milestone
-                  </button>
-                </div>
-                
-                <div className="space-y-2 max-h-32 overflow-y-auto">
-                  {(editingProject.milestones || []).map(milestone => (
-                    <div key={milestone.id} className="flex items-center justify-between p-2 bg-gray-50 rounded">
-                      <div className="flex items-center gap-3">
-                        <span className="font-medium">{milestone.name}</span>
-                        <span className="text-sm text-gray-500">{new Date(milestone.date).toLocaleDateString()}</span>
-                        <div className="flex items-center gap-1">
-                          <span className="text-xs">Shape:</span>
-                          <select
-                            value={milestone.shape}
-                            onChange={(e) => {
-                              const updatedMilestones = editingProject.milestones.map(m =>
-                                m.id === milestone.id ? { ...m, shape: e.target.value } : m
-                              );
-                              setProjects(projects.map(p => 
-                                p.id === editingProject.id ? { ...p, milestones: updatedMilestones } : p
-                              ));
-                            }}
-                            className="text-xs px-1 py-0 border rounded"
-                          >
-                            {shapeOptions.map(shape => (
-                              <option key={shape} value={shape}>{shape}</option>
-                            ))}
-                          </select>
-                          <select
-                            value={milestone.color}
-                            onChange={(e) => {
-                              const updatedMilestones = editingProject.milestones.map(m =>
-                                m.id === milestone.id ? { ...m, color: e.target.value } : m
-                              );
-                              setProjects(projects.map(p => 
-                                p.id === editingProject.id ? { ...p, milestones: updatedMilestones } : p
-                              ));
-                            }}
-                            className="text-xs px-1 py-0 border rounded"
-                          >
-                            {colorOptions.map(color => (
-                              <option key={color} value={color} style={{ backgroundColor: color, color: 'white' }}>
-                                {color}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => removeMilestone(editingProject.id, milestone.id)}
-                        className="text-red-500 hover:text-red-700"
-                      >
-                        <X className="w-4 h-4" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </form>
-
-          {/* Form Actions */}
-          <div className="flex justify-end gap-3 mt-6">
-            <button
-              type="button"
-              onClick={() => {
-                setShowAddProject(false);
-                setEditingProject(null);
-              }}
-              className="px-4 py-2 bg-gray-500 text-white rounded-md hover:bg-gray-600 transition-colors"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={saveProjectFromForm}
-              className="px-4 py-2 bg-green-500 text-white rounded-md hover:bg-green-600 transition-colors"
-            >
-              {editingProject ? 'Update Project' : 'Create Project'}
-            </button>
           </div>
+        ))}
+      </div>
+
+      <div className="flex justify-end gap-3">
+        <button className="px-4 py-2 rounded bg-gray-200">Cancel</button>
+        <button className="px-4 py-2 rounded bg-pira-accent text-white" onClick={submit}>
+          {initial ? 'Save Changes' : 'Create Project'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function PreviewMilestone({ milestone, types }: { milestone: Milestone; types: MilestoneType[] }) {
+  const mt = types.find(t => t.id === milestone.typeId)
+  if (!mt) return null
+  return <ShapeIcon shape={mt.shape} color={mt.color} size={mt.size} />
+}
+
+/* ========== Timeline rendering helpers ========== */
+
+type Col = { start: Date; end: Date; label: string; width: number }
+
+function buildColumns(scale: SettingsState['timeScale'], start: Date, end: Date): Col[] {
+  const cols: Col[] = []
+  const s = new Date(start); s.setHours(0,0,0,0)
+  const e = new Date(end);   e.setHours(0,0,0,0)
+
+  if (scale === 'days') {
+    for (let d = new Date(s); d <= e; d = new Date(d.getTime() + ONE_DAY)) {
+      const sd = new Date(d)
+      const ed = new Date(d.getTime() + ONE_DAY)
+      cols.push({ start: sd, end: ed, label: formatMMDD(sd), width: 30 })
+    }
+  } else if (scale === 'weeks') {
+    const startOfWeek = new Date(s.getTime() - (s.getDay()) * ONE_DAY) // Sunday
+    for (let d = startOfWeek; d <= e; d = new Date(d.getTime() + 7 * ONE_DAY)) {
+      const sd = new Date(d)
+      const ed = new Date(d.getTime() + 7 * ONE_DAY)
+      cols.push({ start: sd, end: ed, label: formatMMDD(sd), width: 80 })
+    }
+  } else if (scale === 'months') {
+    for (let d = new Date(s.getFullYear(), s.getMonth(), 1); d <= e; d.setMonth(d.getMonth() + 1)) {
+      const sd = new Date(d)
+      const ed = new Date(sd.getFullYear(), sd.getMonth() + 1, 1)
+      cols.push({ start: sd, end: ed, label: sd.toLocaleDateString('en-US', { month: 'short', year: '2-digit' }), width: 120 })
+    }
+  } else if (scale === 'quarters') {
+    const startQ = Math.floor(s.getMonth() / 3)
+    for (let y = s.getFullYear(); y <= e.getFullYear(); y++) {
+      for (let q = (y === s.getFullYear() ? startQ : 0); q < 4; q++) {
+        const sd = new Date(y, q * 3, 1)
+        if (sd > e) break
+        const ed = new Date(y, q * 3 + 3, 1)
+        cols.push({ start: sd, end: ed, label: `Q${q + 1} ${String(y).slice(2)}`, width: 160 })
+      }
+    }
+  } else { // years
+    for (let y = s.getFullYear(); y <= e.getFullYear(); y++) {
+      const sd = new Date(y, 0, 1)
+      const ed = new Date(y + 1, 0, 1)
+      cols.push({ start: sd, end: ed, label: `${y}`, width: 200 })
+    }
+  }
+  return cols
+}
+
+function projectPosition(p: Project, cols: Col[]) {
+  const winStart = cols[0]?.start ?? fromISO(p.start)
+  const winEnd = cols[cols.length - 1]?.end ?? new Date(fromISO(p.due).getTime() + ONE_DAY)
+
+  const s = fromISO(p.start)
+  const d = fromISO(p.due)
+  const dur = (d.getTime() + ONE_DAY) - s.getTime() // inclusive end
+  const total = winEnd.getTime() - winStart.getTime()
+
+  const left = clamp(((s.getTime() - winStart.getTime()) / total) * 100, 0, 100)
+  const width = clamp((dur / total) * 100, 0, 100 - left)
+  return { left: `${left}%`, width: `${Math.max(width, 1)}%` }
+}
+
+/* ========== Unified View (Team -> Member) ========== */
+
+function UnifiedView({
+  teams, projects, milestoneTypes, settings, setSettings
+}: {
+  teams: Team[]
+  projects: Project[]
+  milestoneTypes: MilestoneType[]
+  settings: SettingsState
+  setSettings: (s: SettingsState) => void
+}) {
+  const [range, setRange] = React.useState<{ start: string; end: string }>(() => {
+    const start = toISO(new Date(Date.now() - 30 * ONE_DAY))
+    const end = toISO(new Date(Date.now() + 120 * ONE_DAY))
+    return { start, end }
+  })
+
+  const cols = React.useMemo(() => buildColumns(settings.timeScale, fromISO(range.start), fromISO(range.end)),
+    [settings.timeScale, range])
+
+  const todayPct = React.useMemo(() => {
+    const today = new Date(); today.setHours(0,0,0,0)
+    const s = cols[0]?.start, e = cols[cols.length - 1]?.end
+    if (!s || !e || today < s || today > e) return -1
+    return ((today.getTime() - s.getTime()) / (e.getTime() - s.getTime())) * 100
+  }, [cols])
+
+  return (
+    <div className="max-w-6xl mx-auto p-4 space-y-4">
+      <div className="bg-white rounded-xl shadow p-3 flex flex-wrap gap-3 items-end">
+        <div>
+          <label className="text-xs text-gray-500">Time Scale</label>
+          <select className="border rounded px-2 py-1" value={settings.timeScale}
+            onChange={e => setSettings({ ...settings, timeScale: e.target.value as any })}>
+            <option value="days">Days</option>
+            <option value="weeks">Weeks</option>
+            <option value="months">Months</option>
+            <option value="quarters">Quarters</option>
+            <option value="years">Years</option>
+          </select>
+        </div>
+        <div>
+          <label className="text-xs text-gray-500">Start</label>
+          <input type="date" className="border rounded px-2 py-1" value={range.start}
+            onChange={e => setRange(r => ({ ...r, start: e.target.value }))} />
+        </div>
+        <div>
+          <label className="text-xs text-gray-500">End</label>
+          <input type="date" className="border rounded px-2 py-1" value={range.end}
+            onChange={e => setRange(r => ({ ...r, end: e.target.value }))} />
+        </div>
+        <Toggle label="Executive Mode" value={settings.executiveMode}
+          onChange={v => setSettings({ ...settings, executiveMode: v })} />
+        <Toggle label="Weekend Shading" value={settings.weekendShading}
+          onChange={v => setSettings({ ...settings, weekendShading: v })} />
+        <Toggle label="Snap to Grid" value={settings.snapToGrid}
+          onChange={v => setSettings({ ...settings, snapToGrid: v })} />
+      </div>
+
+      <div className="bg-white rounded-xl shadow overflow-hidden">
+        {/* Header scale */}
+        <div className="border-b bg-gray-50 p-3">
+          <div className="flex">
+            <div className="w-64 font-medium">Team / Members</div>
+            <div className="flex-1 relative">
+              <div className="flex border-l">
+                {cols.map((c, i) => (
+                  <div key={i} className="border-r border-gray-200 text-center text-xs font-medium py-2"
+                    style={{ minWidth: `${c.width}px` }}>{c.label}</div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Body */}
+        <div>
+          {teams.map(team => {
+            const teamMembers = team.members
+            return (
+              <div key={team.id} className="border-b">
+                <div className="bg-indigo-50 px-4 py-2 font-semibold text-indigo-700">{team.name}</div>
+
+                {teamMembers.length === 0 && (
+                  <div className="flex">
+                    <div className="w-64 p-3 text-gray-500">No members</div>
+                    <div className="flex-1 p-3 border-l">No projects</div>
+                  </div>
+                )}
+
+                {teamMembers.map((member, idx) => {
+                  const memberIdPrefix = `${team.id}:${member}`
+                  const memberProjects = projects.filter(p => p.assigneeIds.some(id => id === memberIdPrefix))
+                  const nameText = settings.executiveMode ? `Resource ${idx + 1}` : member
+
+                  return (
+                    <div key={member} className="flex border-t">
+                      <div className="w-64 p-3">
+                        <div className="font-medium">{nameText}</div>
+                        <div className="text-xs text-gray-500">{memberProjects.length} project{memberProjects.length === 1 ? '' : 's'}</div>
+                      </div>
+                      <div className="flex-1 relative h-12 border-l overflow-hidden">
+                        {/* grid & weekend shading */}
+                        {cols.map((c, i) => (
+                          <div key={i} className={`absolute top-0 bottom-0 border-r border-gray-200`}
+                            style={{ left: `${(i / cols.length) * 100}%`, width: `${100 / cols.length}%`,
+                              background: settings.weekendShading && (c.start.getDay() === 0 || c.start.getDay() === 6) && settings.timeScale==='days'
+                                ? 'rgba(0,0,0,0.03)' : undefined }} />
+                        ))}
+                        {/* Today line */}
+                        {settings.todayLine && todayPct >= 0 && (
+                          <div className="absolute top-0 bottom-0 w-0.5 bg-black/70" style={{ left: `${todayPct}%` }} />
+                        )}
+
+                        {/* Project bars for this member */}
+                        {memberProjects.map(p => {
+                          const pos = projectPosition(p, cols)
+                          return (
+                            <Bar key={p.id} project={p} pos={pos} cols={cols} milestoneTypes={milestoneTypes} settings={settings} />
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* ========== Draggable/Resizable Bar ========== */
+
+function Bar({
+  project, pos, cols, milestoneTypes, settings
+}: {
+  project: Project
+  pos: { left: string; width: string }
+  cols: Col[]
+  milestoneTypes: MilestoneType[]
+  settings: SettingsState
+}) {
+  const [drag, setDrag] = React.useState<null | { startX: number; origStart: Date; origDue: Date; mode: 'move' | 'left' | 'right' }>(null)
+
+  const barColor = project.barColor || '#5B6BFF'
+
+  const onMouseDown = (mode: 'move' | 'left' | 'right') => (e: React.MouseEvent) => {
+    e.preventDefault()
+    setDrag({ startX: e.clientX, origStart: fromISO(project.start), origDue: fromISO(project.due), mode })
+  }
+
+  React.useEffect(() => {
+    function onMove(e: MouseEvent) {
+      if (!drag) return
+      const container = (e.target as HTMLElement).closest('.timeline-row') as HTMLElement | null
+      const row = container ?? document.body
+      const rect = (row as HTMLElement).getBoundingClientRect ? (row as HTMLElement).getBoundingClientRect() : { width: window.innerWidth, left: 0 }
+      const totalMs = cols[cols.length - 1].end.getTime() - cols[0].start.getTime()
+      const pxPerMs = rect.width / totalMs
+      const deltaMs = (e.clientX - drag.startX) / pxPerMs
+
+      let newStart = new Date(drag.origStart.getTime())
+      let newDue = new Date(drag.origDue.getTime())
+
+      if (drag.mode === 'move') {
+        newStart = new Date(drag.origStart.getTime() + deltaMs)
+        newDue = new Date(drag.origDue.getTime() + deltaMs)
+      } else if (drag.mode === 'left') {
+        newStart = new Date(drag.origStart.getTime() + deltaMs)
+      } else {
+        newDue = new Date(drag.origDue.getTime() + deltaMs)
+      }
+
+      if (settings.snapToGrid) {
+        const snap = (d: Date) => new Date(toISO(d))
+        newStart = snap(newStart)
+        newDue = snap(newDue)
+      }
+
+      // write back to storage live (auto-save feel)
+      const raw = loadData()
+      const idx = raw.projects.findIndex(pp => pp.id === project.id)
+      if (idx >= 0) {
+        raw.projects[idx].start = toISO(newStart)
+        raw.projects[idx].due = toISO(newDue)
+        saveData(raw)
+      }
+    }
+    function onUp() { setDrag(null) }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
+  }, [drag, cols, project.id, settings.snapToGrid])
+
+  // resolve milestone visuals from legend
+  const mType = (name: string) => milestoneTypes.find(mt => mt.name.toLowerCase() === name.toLowerCase())
+  const startType = mType('Start Date') || milestoneTypes[0]
+  const dueType = mType('Due Date') || milestoneTypes[0]
+
+  const inRow = "absolute top-1/2 -translate-y-1/2 h-4 rounded px-2 flex items-center justify-between text-white timeline-row"
+
+  return (
+    <div className={inRow} style={{ left: pos.left, width: pos.width, backgroundColor: barColor, minWidth: '20px' }}>
+      {/* left handle */}
+      <div className="w-2 cursor-ew-resize" onMouseDown={onMouseDown('left')} />
+      <div className="flex items-center gap-1 text-[10px] whitespace-nowrap">
+        <span className="font-semibold">{project.name}</span>
+        <span>• P{project.priority}</span>
+      </div>
+      {/* start / due markers */}
+      <div className="absolute left-0 -translate-x-1/2">
+        <ShapeIcon shape={startType.shape} color={startType.color} size={startType.size} />
+      </div>
+      <div className="absolute right-0 translate-x-1/2">
+        <ShapeIcon shape={dueType.shape} color={dueType.color} size={dueType.size} />
+      </div>
+      {/* right handle */}
+      <div className="w-2 cursor-ew-resize" onMouseDown={onMouseDown('right')} />
+      {/* move area */}
+      <div className="absolute inset-0 cursor-grab" onMouseDown={onMouseDown('move')} />
+    </div>
+  )
+}
+
+/* ========== Teams Tab (simple manager) ========== */
+
+function TeamsManager({ teams, setTeams }: { teams: Team[]; setTeams: (f: (prev: Team[]) => Team[]) => void }) {
+  const [newTeam, setNewTeam] = React.useState('')
+  const addTeam = () => { if (!newTeam.trim()) return; setTeams(prev => [...prev, { id: uid(), name: newTeam.trim(), members: [] }]); setNewTeam('') }
+  const addMember = (teamId: string, name: string) => {
+    if (!name.trim()) return
+    setTeams(prev => prev.map(t => t.id === teamId ? { ...t, members: [...t.members, name.trim()] } : t))
+  }
+  const removeMember = (teamId: string, name: string) =>
+    setTeams(prev => prev.map(t => t.id === teamId ? { ...t, members: t.members.filter(m => m !== name) } : t))
+  const renameTeam = (teamId: string, name: string) =>
+    setTeams(prev => prev.map(t => t.id === teamId ? { ...t, name } : t))
+  const deleteTeam = (teamId: string) =>
+    setTeams(prev => prev.filter(t => t.id !== teamId))
+
+  return (
+    <div className="max-w-5xl mx-auto p-4 space-y-4">
+      <div className="bg-white rounded-xl shadow p-3">
+        <div className="flex gap-2">
+          <input className="border rounded px-2 py-1 flex-1" placeholder="Team name" value={newTeam} onChange={e => setNewTeam(e.target.value)} />
+          <button className="px-3 py-1 bg-pira-accent text-white rounded" onClick={addTeam}>Add Team</button>
+        </div>
+      </div>
+
+      {teams.map(team => (
+        <div key={team.id} className="bg-white rounded-xl shadow p-4 space-y-3">
+          <div className="flex items-center gap-3">
+            <input className="text-xl font-semibold flex-1 border rounded px-2 py-1" value={team.name}
+              onChange={e => renameTeam(team.id, e.target.value)} />
+            <button className="text-red-600" onClick={() => deleteTeam(team.id)}>Delete</button>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {team.members.map((m, idx) => (
+              <span key={m} className="px-2 py-1 bg-blue-100 text-blue-800 rounded">
+                {m}
+                <button className="ml-2 text-blue-800/70" onClick={() => removeMember(team.id, m)}>x</button>
+              </span>
+            ))}
+          </div>
+          <AddMemberRow onAdd={(name) => addMember(team.id, name)} />
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function AddMemberRow({ onAdd }: { onAdd: (name: string) => void }) {
+  const [name, setName] = React.useState('')
+  return (
+    <div className="flex gap-2">
+      <input className="border rounded px-2 py-1 flex-1" placeholder="New member name" value={name} onChange={e => setName(e.target.value)} />
+      <button className="px-3 py-1 bg-green-600 text-white rounded" onClick={() => { onAdd(name); setName('') }}>Add Member</button>
+    </div>
+  )
+}
+
+/* ========== Projects Tab (list + modal-lite inline form) ========== */
+
+function ProjectsTab({ teams, projects, setProjects, milestoneTypes, settings }:
+  { teams: Team[]; projects: Project[]; setProjects: (f: (prev: Project[]) => Project[]) => void; milestoneTypes: MilestoneType[]; settings: SettingsState }) {
+  const [editing, setEditing] = React.useState<Project | null>(null)
+
+  return (
+    <div className="max-w-6xl mx-auto p-4 space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-2xl font-bold">Project Management</h2>
+        <button className="px-4 py-2 bg-pira-accent text-white rounded-xl" onClick={() => setEditing({} as any)}>+ Add Project</button>
+      </div>
+
+      {editing && (
+        <div className="bg-white rounded-xl shadow p-4">
+          <ProjectForm
+            teams={teams} milestoneTypes={milestoneTypes} settings={settings} initial={editing.id ? editing : undefined}
+            onSave={p => { setProjects(prev => {
+                const exists = prev.some(x => x.id === p.id)
+                return exists ? prev.map(x => x.id === p.id ? p : x) : [...prev, p]
+              }); setEditing(null) }}
+          />
         </div>
       )}
 
-      {/* Projects List */}
-      <div className="bg-white rounded-lg shadow-md">
-        <div className="p-4 border-b border-gray-200">
-          <h3 className="text-lg font-semibold">All Projects</h3>
+      <div className="bg-white rounded-xl shadow">
+        <div className="p-4 border-b font-semibold">All Projects</div>
+        <div className="divide-y">
+          {projects.length === 0 && <div className="p-6 text-center text-gray-500">No projects yet. Click “Add Project”.</div>}
+          {projects.map(p => (
+            <div key={p.id} className="p-4 flex items-center justify-between">
+              <div>
+                <div className="font-semibold">{p.name} <span className="text-sm text-gray-500">Priority {p.priority}</span></div>
+                <div className="text-sm text-gray-600">Start: {p.start} • Due: {p.due}</div>
+              </div>
+              <div className="flex gap-3">
+                <button className="text-blue-700" onClick={() => setEditing(p)}>Edit</button>
+                <button className="text-red-600" onClick={() => setProjects(prev => prev.filter(x => x.id !== p.id))}>Delete</button>
+              </div>
+            </div>
+          ))}
         </div>
-        
-        {projects.length === 0 ? (
-          <div className="p-8 text-center text-gray-500">
-            <p>No projects created yet.</p>
-            <button
-              onClick={() => setShowAddProject(true)}
-              className="mt-2 text-blue-500 hover:text-blue-700 font-medium"
-            >
-              Create your first project
-            </button>
-          </div>
-        ) : (
-          <div className="divide-y divide-gray-200">
-            {projects.map(project => {
-              const statusColor = statusOptions.find(s => s.name === project.status)?.color || '#6B7280';
-              return (
-                <div key={project.id} className="p-4 hover:bg-gray-50">
-                  <div className="flex justify-between items-start">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-3 mb-2">
-                        <h4 className="text-lg font-semibold text-gray-800">{project.name}</h4>
-                        {project.priority && (
-                          <span className="px-2 py-1 bg-gray-100 text-gray-700 text-sm rounded">
-                            Priority: {project.priority}
-                          </span>
-                        )}
-                        <span 
-                          className="px-2 py-1 text-white text-sm rounded"
-                          style={{ backgroundColor: statusColor }}
-                        >
-                          {project.status}
-                        </span>
-                      </div>
-                      
-                      {project.description && (
-                        <p className="text-gray-600 mb-2">{project.description}</p>
-                      )}
-                      
-                      <div className="flex flex-wrap gap-4 text-sm text-gray-500 mb-2">
-                        <span>Start: {new Date(project.startDate).toLocaleDateString()}</span>
-                        <span>Due: {new Date(project.dueDate).toLocaleDateString()}</span>
-                        {project.stabilizationDate && (
-                          <span>Stabilization: {new Date(project.stabilizationDate).toLocaleDateString()}</span>
-                        )}
-                        {project.completionDate && (
-                          <span>Completed: {new Date(project.completionDate).toLocaleDateString()}</span>
-                        )}
-                      </div>
-                      
-                      {project.assignedMembers.length > 0 && (
-                        <div className="flex items-center gap-1 flex-wrap">
-                          <span className="text-sm text-gray-500">Assigned:</span>
-                          {project.assignedMembers.map(member => {
-                            const memberData = getAllMembers().find(m => m.name === member);
-                            return (
-                              <span 
-                                key={member}
-                                className="px-2 py-1 bg-blue-100 text-blue-800 text-sm rounded"
-                              >
-                                {showExecutiveMode ? 'Member' : member}
-                                {memberData && !showExecutiveMode && (
-                                  <span className="text-blue-600"> ({memberData.teamName})</span>
-                                )}
-                              </span>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                    
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => startEditProject(project)}
-                        className="text-blue-500 hover:text-blue-700 transition-colors"
-                        title="Edit Project"
-                      >
-                        <Settings className="w-4 h-4" />
-                      </button>
-                      <button
-                        onClick={() => deleteProject(project.id)}
-                        className="text-red-500 hover:text-red-700 transition-colors"
-                        title="Delete Project"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+      </div>
+
+      <div className="bg-white rounded-xl shadow p-4">
+        <LegendSection />
+      </div>
+    </div>
+  )
+
+  function LegendSection() {
+    return (
+      <div className="space-y-3">
+        <h3 className="text-lg font-semibold">Legend (Global Settings)</h3>
+        <p className="text-sm text-gray-600">Manage milestone types and default project bar color in <strong>Unified View</strong> tab’s Legend section.</p>
+      </div>
+    )
+  }
+}
+
+/* ========== Reports (MVP) ========== */
+
+function ReportsTab({ teams, projects }: { teams: Team[]; projects: Project[] }) {
+  const today = toISO(new Date())
+
+  const overdue = projects.filter(p => p.due < today && p.status !== 'Complete')
+
+  // Conflicts: same member on overlapping active projects
+  type Conflict = { memberId: string; memberName: string; teamName: string; a: string; b: string; overlap: string }
+  const conflicts: Conflict[] = []
+
+  const memberName = (id: string) => {
+    const [teamId, name] = id.split(':')
+    const team = teams.find(t => t.id === teamId)
+    return { name, teamName: team?.name || '' }
+  }
+
+  // Build per member project list
+  const byMember: Record<string, Project[]> = {}
+  projects.forEach(p => {
+    p.assigneeIds.forEach(id => {
+      byMember[id] = byMember[id] || []
+      byMember[id].push(p)
+    })
+  })
+
+  Object.entries(byMember).forEach(([id, list]) => {
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        const A = list[i], B = list[j]
+        const aS = fromISO(A.start), aE = fromISO(A.due)
+        const bS = fromISO(B.start), bE = fromISO(B.due)
+        if (aS <= bE && bS <= aE) {
+          const overStart = new Date(Math.max(aS.getTime(), bS.getTime()))
+          const overEnd = new Date(Math.min(aE.getTime(), bE.getTime()))
+          const { name, teamName } = memberName(id)
+          conflicts.push({ memberId: id, memberName: name, teamName, a: A.name, b: B.name, overlap: `${toISO(overStart)} → ${toISO(overEnd)}` })
+        }
+      }
+    }
+  })
+
+  const statusCounts = projects.reduce<Record<string, number>>((acc, p) => (acc[p.status] = (acc[p.status] || 0) + 1, acc), {})
+
+  return (
+    <div className="max-w-6xl mx-auto p-4 space-y-6">
+      <div className="bg-white rounded-xl shadow p-4">
+        <h3 className="text-lg font-semibold mb-2">Overdue Projects</h3>
+        {overdue.length === 0 ? <p className="text-gray-500 text-sm">None 🎉</p> : (
+          <ul className="list-disc pl-6">{overdue.map(p => <li key={p.id}>{p.name} (Due {p.due})</li>)}</ul>
+        )}
+      </div>
+
+      <div className="bg-white rounded-xl shadow p-4">
+        <h3 className="text-lg font-semibold mb-2">Status Dashboard</h3>
+        <div className="flex gap-4">
+          {Object.entries(statusCounts).map(([s, n]) => (
+            <div key={s} className="px-4 py-3 bg-gray-50 rounded border">
+              <div className="text-sm text-gray-600">{s}</div>
+              <div className="text-2xl font-bold">{n}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="bg-white rounded-xl shadow p-4">
+        <h3 className="text-lg font-semibold mb-2">Resource Conflicts (Overlapping)</h3>
+        {conflicts.length === 0 ? <p className="text-gray-500 text-sm">None</p> : (
+          <table className="w-full text-sm">
+            <thead><tr className="text-left"><th>Member</th><th>Team</th><th>Project A</th><th>Project B</th><th>Overlap</th></tr></thead>
+            <tbody>{conflicts.map((c, i) => <tr key={i}><td>{c.memberName}</td><td>{c.teamName}</td><td>{c.a}</td><td>{c.b}</td><td>{c.overlap}</td></tr>)}</tbody>
+          </table>
         )}
       </div>
     </div>
-  );
+  )
+}
 
-  // Other components
-  const UnifiedView = () => (
-    <div className="p-6 text-center">
-      <h2 className="text-2xl font-bold mb-4">Unified Project View</h2>
-      <p className="text-gray-600">Timeline and project visualization will be built in the next section.</p>
-    </div>
-  );
+/* ========== Root App ========== */
 
-  const TeamView = ({ teamId }) => {
-    const team = teams.find(t => t.id === teamId);
-    const teamProjects = projects.filter(project => 
-      project.assignedMembers.some(member => 
-        team?.members.includes(member)
-      )
-    );
-    const columns = generateTimelineColumns();
+export default function ProjectManagementApp() {
+  const [data, setData] = React.useState<DataShape>(loadData)
+  const [active, setActive] = React.useState<Tab>('unified')
 
-    return (
-      <div className="p-6">
-        <div className="flex justify-between items-center mb-6">
-          <h2 className="text-2xl font-bold text-gray-800">{team?.name} Team Timeline</h2>
-          <div className="flex items-center gap-4">
-            <select 
-              value={timelineView} 
-              onChange={(e) => setTimelineView(e.target.value)}
-              className="px-3 py-1 border border-gray-300 rounded-md"
-            >
-              <option value="days">Days</option>
-              <option value="weeks">Weeks</option>
-              <option value="months">Months</option>
-            </select>
-          </div>
-        </div>
+  // autosave
+  React.useEffect(() => { saveData(data) }, [data])
 
-        <div className="bg-white rounded-lg shadow-md overflow-hidden">
-          {/* Team Members & Their Projects */}
-          <div className="border-b bg-gray-50 p-4">
-            <div className="flex">
-              <div className="w-64 font-medium">Team Members</div>
-              <div className="flex-1 relative">
-                <div className="flex border-l">
-                  {columns.map((col, index) => (
-                    <div 
-                      key={index} 
-                      className="border-r border-gray-200 text-center text-xs font-medium py-2"
-                      style={{ minWidth: `${col.width}px` }}
-                    >
-                      {col.label}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
+  const setTeams = (f: (prev: Team[]) => Team[]) => setData(prev => ({ ...prev, teams: f(prev.teams) }))
+  const setProjects = (f: (prev: Project[]) => Project[]) => setData(prev => ({ ...prev, projects: f(prev.projects) }))
+  const setMilestoneTypes = (f: (prev: MilestoneType[]) => MilestoneType[]) => setData(prev => ({ ...prev, milestoneTypes: f(prev.milestoneTypes) }))
+  const setSettings = (s: SettingsState) => setData(prev => ({ ...prev, settings: s }))
 
-          <div className="divide-y divide-gray-200">
-            {team?.members.map(member => {
-              const memberProjects = teamProjects.filter(project => 
-                project.assignedMembers.includes(member)
-              );
-
-              return (
-                <div key={member}>
-                  {/* Member Header */}
-                  <div className="bg-blue-50 border-b border-blue-100">
-                    <div className="flex">
-                      <div className="w-64 p-3 font-medium text-blue-800">
-                        {showExecutiveMode ? 'Team Member' : member}
-                        <span className="text-xs text-blue-600 block">
-                          {memberProjects.length} project{memberProjects.length !== 1 ? 's' : ''}
-                        </span>
-                      </div>
-                      <div className="flex-1 border-l border-blue-200"></div>
-                    </div>
-                  </div>
-
-                  {/* Member's Projects */}
-                  {memberProjects.length === 0 ? (
-                    <div className="flex">
-                      <div className="w-64 p-4"></div>
-                      <div className="flex-1 p-4 text-gray-500 text-sm border-l">
-                        No current projects assigned
-                      </div>
-                    </div>
-                  ) : (
-                    memberProjects.map(project => {
-                      const position = calculateProjectPosition(project, columns);
-                      return (
-                        <div key={project.id} className="flex items-center hover:bg-gray-50">
-                          <div className="w-64 p-4 pl-8">
-                            <div className="text-sm font-medium">
-                              {showExecutiveMode ? 'Project' : project.name}
-                            </div>
-                            {project.priority && (
-                              <div className="text-xs text-gray-500">Priority: {project.priority}</div>
-                            )}
-                          </div>
-                          
-                          <div className="flex-1 relative h-12 border-l">
-                            {/* Grid lines */}
-                            {columns.map((col, index) => (
-                              <div 
-                                key={index}
-                                className="absolute border-r border-gray-200 h-full"
-                                style={{ left: `${(index / columns.length) * 100}%` }}
-                              />
-                            ))}
-                            
-                            {/* Project Bar */}
-                            <div
-                              className="absolute top-1/2 transform -translate-y-1/2 h-4 rounded flex items-center justify-between px-1"
-                              style={{
-                                left: position.left,
-                                width: position.width,
-                                backgroundColor: project.projectColor || '#3B82F6',
-                                minWidth: '16px'
-                              }}
-                            >
-                              <div className="flex items-center">
-                                {renderShape(project.startDateShape || 'diamond', project.startDateColor || '#10B981', 8)}
-                              </div>
-                              <div className="flex items-center">
-                                {renderShape(project.dueDateShape || 'diamond', project.dueDateColor || '#EF4444', 8)}
-                              </div>
-                            </div>
-
-                            {/* Milestones */}
-                            {(project.milestones || []).map((milestone) => {
-                              const milestoneDate = new Date(milestone.date);
-                              const timelineStart = columns[0]?.date || new Date();
-                              const timelineEnd = columns[columns.length - 1]?.date || new Date();
-                              const totalDuration = timelineEnd - timelineStart;
-                              const milestoneOffset = milestoneDate - timelineStart;
-                              const milestoneLeft = Math.max(0, Math.min(100, (milestoneOffset / totalDuration) * 100));
-
-                              return (
-                                <div
-                                  key={milestone.id}
-                                  className="absolute top-1/2 transform -translate-y-1/2 -translate-x-1/2"
-                                  style={{ left: `${milestoneLeft}%` }}
-                                  title={`${milestone.name} - ${new Date(milestone.date).toLocaleDateString()}`}
-                                >
-                                  {renderShape(milestone.shape, milestone.color, 10)}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-    );
-  };
-
-  const Reports = () => (
-    <div className="p-6 text-center">
-      <h2 className="text-2xl font-bold mb-4">Reports & Analytics</h2>
-      <p className="text-gray-600">Comprehensive reporting suite will be built in a later section.</p>
-    </div>
-  );
-
-  // Tab content renderer
-  const renderTabContent = () => {
-    switch (activeTab) {
-      case 'unified':
-        return <UnifiedView />;
-      case 'teams':
-        return <TeamManagement />;
-      case 'projects':
-        return <ProjectManagement />;
-      case 'reports':
-        return <Reports />;
-      default:
-        const teamTab = teamTabs.find(tab => tab.id === activeTab);
-        if (teamTab) {
-          return <TeamView teamId={teamTab.teamId} />;
-        }
-        return <UnifiedView />;
+  // export/import JSON
+  const exportJSON = () => {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url; a.download = `pira-backup-${Date.now()}.json`; a.click()
+    URL.revokeObjectURL(url)
+  }
+  const importJSON = (file: File) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      try { setData(JSON.parse(String(reader.result))); } catch { alert('Invalid JSON') }
     }
-  };
+    reader.readAsText(file)
+  }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-100">
-      {/* Header */}
-      <header className="bg-white/80 backdrop-blur-sm shadow-sm border-b border-blue-100">
-        <div className="max-w-7xl mx-auto px-4 py-6">
-          <div className="text-center">
-            <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 via-indigo-600 to-slate-700 bg-clip-text text-transparent mb-2">
-              PIRA
-            </h1>
-            <p className="text-lg text-slate-600 font-medium">
-              Project IT Resource Availability
-            </p>
-          </div>
+    <div className="min-h-screen font-sans">
+      <Header active={active} setActive={setActive} />
+
+      <div className="max-w-6xl mx-auto px-4 pt-4 pb-20 space-y-4">
+        <div className="flex gap-2 no-print">
+          <button className="px-3 py-1 rounded bg-gray-200" onClick={exportJSON}>Export JSON</button>
+          <label className="px-3 py-1 rounded bg-gray-200 cursor-pointer">
+            Import JSON
+            <input type="file" accept="application/json" className="hidden" onChange={e => {
+              const f = e.target.files?.[0]; if (f) importJSON(f)
+            }} />
+          </label>
+          <button className="px-3 py-1 rounded bg-gray-200" onClick={() => window.print()}>Print / Save PDF</button>
         </div>
-      </header>
 
-      {/* Navigation Tabs */}
-      <nav className="bg-white/70 backdrop-blur-sm border-b border-blue-100">
-        <div className="max-w-7xl mx-auto px-4">
-          <div className="flex overflow-x-auto">
-            <button
-              onClick={() => setActiveTab('unified')}
-              className={`px-4 py-3 font-medium text-sm border-b-2 whitespace-nowrap transition-all duration-200 ${
-                activeTab === 'unified' 
-                  ? 'border-blue-500 text-blue-600 bg-blue-50/50' 
-                  : 'border-transparent text-slate-600 hover:text-slate-800 hover:bg-slate-50'
-              }`}
-            >
-              <Calendar className="w-4 h-4 inline mr-2" />
-              Unified View
-            </button>
+        {active === 'unified' && (
+          <>
+            <LegendManager
+              milestoneTypes={data.milestoneTypes}
+              setMilestoneTypes={setMilestoneTypes}
+              settings={data.settings}
+              setSettings={setSettings}
+            />
+            <UnifiedView
+              teams={data.teams}
+              projects={data.projects}
+              milestoneTypes={data.milestoneTypes}
+              settings={data.settings}
+              setSettings={setSettings}
+            />
+          </>
+        )}
 
-            {teamTabs.map(tab => (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                className={`px-4 py-3 font-medium text-sm border-b-2 whitespace-nowrap transition-all duration-200 ${
-                  activeTab === tab.id 
-                    ? 'border-blue-500 text-blue-600 bg-blue-50/50' 
-                    : 'border-transparent text-slate-600 hover:text-slate-800 hover:bg-slate-50'
-                }`}
-              >
-                <Users className="w-4 h-4 inline mr-2" />
-                {tab.label}
-              </button>
-            ))}
+        {active === 'teams' && (
+          <TeamsManager teams={data.teams} setTeams={setTeams} />
+        )}
 
-            <button
-              onClick={() => setActiveTab('teams')}
-              className={`px-4 py-3 font-medium text-sm border-b-2 whitespace-nowrap transition-all duration-200 ${
-                activeTab === 'teams' 
-                  ? 'border-indigo-500 text-indigo-600 bg-indigo-50/50' 
-                  : 'border-transparent text-slate-600 hover:text-slate-800 hover:bg-slate-50'
-              }`}
-            >
-              <Settings className="w-4 h-4 inline mr-2" />
-              Teams
-            </button>
+        {active === 'projects' && (
+          <ProjectsTab
+            teams={data.teams}
+            projects={data.projects}
+            setProjects={setProjects}
+            milestoneTypes={data.milestoneTypes}
+            settings={data.settings}
+          />
+        )}
 
-            <button
-              onClick={() => setActiveTab('projects')}
-              className={`px-4 py-3 font-medium text-sm border-b-2 whitespace-nowrap transition-all duration-200 ${
-                activeTab === 'projects' 
-                  ? 'border-indigo-500 text-indigo-600 bg-indigo-50/50' 
-                  : 'border-transparent text-slate-600 hover:text-slate-800 hover:bg-slate-50'
-              }`}
-            >
-              <Plus className="w-4 h-4 inline mr-2" />
-              Projects
-            </button>
-
-            <button
-              onClick={() => setActiveTab('reports')}
-              className={`px-4 py-3 font-medium text-sm border-b-2 whitespace-nowrap transition-all duration-200 ${
-                activeTab === 'reports' 
-                  ? 'border-indigo-500 text-indigo-600 bg-indigo-50/50' 
-                  : 'border-transparent text-slate-600 hover:text-slate-800 hover:bg-slate-50'
-              }`}
-            >
-              <BarChart3 className="w-4 h-4 inline mr-2" />
-              Reports
-            </button>
-          </div>
-        </div>
-      </nav>
-
-      {/* Main Content */}
-      <main className="max-w-7xl mx-auto">
-        {renderTabContent()}
-      </main>
+        {active === 'reports' && (
+          <ReportsTab teams={data.teams} projects={data.projects} />
+        )}
+      </div>
     </div>
-  );
-};
-
-export default ProjectManagementApp;
+  )
+}
