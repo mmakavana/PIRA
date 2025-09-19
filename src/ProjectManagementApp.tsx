@@ -1,997 +1,791 @@
-import React from 'react'
-import { CalendarDays, Users, UserCog, PlusCircle, Settings, BarChart3 } from 'lucide-react'
+import React, { useMemo, useState } from "react";
+import {
+  MS_PER_DAY,
+  toEpochUTCNoon,
+  toInputYYYYMMDD,
+  xFromDate,
+  widthFromDates,
+  weeklyTicks,
+  monthlyTicks,
+  todayUTCNoon,
+} from "./utils/dateMath";
 
-/* ========== Types ========== */
+/** ========== Types ========== */
+type ID = string;
 
-type UUID = string
+type Member = { id: ID; name: string; teamId: ID; active?: boolean };
+type Team = { id: ID; name: string };
+type Status = "In Progress" | "Stabilization" | "On Hold" | "Complete";
 
 type MilestoneType = {
-  id: UUID
-  name: string
-  shape: 'diamond' | 'circle' | 'triangle' | 'square'
-  color: string
-  size: 'small' | 'medium' | 'large'
-}
-
+  id: ID;
+  name: string;
+  shape: "diamond" | "circle" | "triangle" | "square";
+  color: string;
+  size: "small" | "medium" | "large";
+};
 type Milestone = {
-  id: UUID
-  typeId: UUID
-  date: string // ISO date (yyyy-mm-dd)
-  label?: string
-}
-
+  id: ID;
+  typeId: ID;
+  dateMs: number; // UTC noon ms
+  label?: string;
+};
 type Project = {
-  id: UUID
-  name: string
-  description?: string
-  priority: number // 1 highest
-  status: string
-  start: string
-  due: string
-  milestones: Milestone[]
-  assigneeIds: string[] // teamId:memberName IDs
-  barColor?: string
-  history?: { ts: string; field: string; oldVal: string; newVal: string }[]
+  id: ID;
+  name: string;
+  description?: string;
+  priority: number;
+  status: Status;
+  startMs: number;
+  dueMs: number;
+  barColor?: string;
+  milestoneIds: ID[];
+  assigneeIds: ID[];
+  history?: any[];
+};
+type Settings = {
+  defaultBarColor: string;
+  showToday: boolean;
+  executiveMode: boolean; // masks names
+  weekendShading: boolean;
+  pxPerDay: number; // fixed width per day (keeps scale consistent)
+  timeScale: "Days" | "Weeks" | "Months" | "Quarter" | "Year";
+};
+
+type Store = {
+  teams: Team[];
+  members: Member[];
+  projects: Project[];
+  milestoneTypes: MilestoneType[];
+  milestones: Record<ID, Milestone>;
+  settings: Settings;
+};
+
+/** ========== Seed data ========== */
+const uid = () => Math.random().toString(36).slice(2, 10);
+
+const SEED: Store = {
+  teams: [
+    { id: "t-app", name: "AppDev" },
+    { id: "t-bi", name: "BI" },
+    { id: "t-qa", name: "QA" },
+    { id: "t-devops", name: "DevOps" },
+  ],
+  members: [
+    { id: "m-jon", name: "Jonathan", teamId: "t-app" },
+    { id: "m-yur", name: "Yuriy", teamId: "t-app" },
+    { id: "m-eli", name: "Elizabeth", teamId: "t-app" },
+    { id: "m-jrg", name: "Jorge", teamId: "t-app" },
+    { id: "m-har", name: "Harald", teamId: "t-app" },
+    { id: "m-ang", name: "Angel", teamId: "t-app" },
+  ],
+  projects: [],
+  milestoneTypes: [
+    { id: "mt-start", name: "Start Date", shape: "diamond", color: "#B04BEA", size: "small" },
+    { id: "mt-due", name: "Due Date", shape: "diamond", color: "#111827", size: "small" },
+    { id: "mt-stab", name: "Stabilization", shape: "diamond", color: "#4F7BFF", size: "medium" },
+    { id: "mt-comp", name: "Complete", shape: "diamond", color: "#19B47E", size: "medium" },
+  ],
+  milestones: {},
+  settings: {
+    defaultBarColor: "#5863F8",
+    showToday: true,
+    executiveMode: false,
+    weekendShading: true,
+    pxPerDay: 16, // fixed, matches CSS var
+    timeScale: "Weeks",
+  },
+};
+
+/** Persist in localStorage for simplicity */
+const KEY = "pira-store-v2";
+function useStore(): [Store, (s: Store) => void] {
+  const [state, setState] = useState<Store>(() => {
+    const raw = localStorage.getItem(KEY);
+    return raw ? (JSON.parse(raw) as Store) : SEED;
+  });
+  const update = (next: Store) => {
+    setState(next);
+    localStorage.setItem(KEY, JSON.stringify(next));
+  };
+  return [state, update];
 }
 
-type Team = {
-  id: UUID
-  name: string
-  members: string[] // names only; id will be teamId:name
-}
-
-type SettingsState = {
-  defaultBarColor: string
-  weekStartsOnSunday: boolean
-  todayLine: boolean
-  weekendShading: boolean
-  snapToGrid: boolean
-  executiveMode: boolean
-  timeScale: 'days' | 'weeks' | 'months' | 'quarters' | 'years'
-}
-
-/* ========== Utilities ========== */
-
-const ONE_DAY = 24 * 60 * 60 * 1000
-const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36)
-
-const toISO = (d: Date) => {
-  const dt = new Date(d)
-  dt.setHours(0, 0, 0, 0)
-  return dt.toISOString().slice(0, 10)
-}
-
-const fromISO = (s: string) => {
-  const d = new Date(s)
-  d.setHours(0, 0, 0, 0)
-  return d
-}
-
-const clamp = (x: number, min: number, max: number) => Math.max(min, Math.min(max, x))
-
-function formatMMDD(d: Date) {
-  return d.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' })
-}
-
-/* ========== Persistence (localStorage for MVP) ========== */
-
-const STORAGE_KEY = 'pira-data-v1'
-type DataShape = {
-  teams: Team[]
-  projects: Project[]
-  milestoneTypes: MilestoneType[]
-  settings: SettingsState
-}
-
-function loadData(): DataShape {
-  const raw = localStorage.getItem(STORAGE_KEY)
-  if (raw) {
-    try {
-      return JSON.parse(raw)
-    } catch {}
-  }
-  // Seed with starter
-  return {
-    teams: [
-      { id: uid(), name: 'Development', members: ['John', 'Sarah', 'Mike'] },
-      { id: uid(), name: 'QA', members: ['Priya', 'Tom'] },
-      { id: uid(), name: 'DevOps', members: ['Alex'] },
-    ],
-    projects: [],
-    milestoneTypes: [
-      { id: uid(), name: 'Start Date', shape: 'diamond', color: '#10B981', size: 'small' },
-      { id: uid(), name: 'Due Date', shape: 'diamond', color: '#EF4444', size: 'small' },
-      { id: uid(), name: 'Stabilization', shape: 'diamond', color: '#3B82F6', size: 'medium' },
-      { id: uid(), name: 'Complete', shape: 'diamond', color: '#10B981', size: 'medium' },
-    ],
-    settings: {
-      defaultBarColor: '#5B6BFF',
-      weekStartsOnSunday: true,
-      todayLine: true,
-      weekendShading: true,
-      snapToGrid: true,
-      executiveMode: false,
-      timeScale: 'weeks',
-    },
-  }
-}
-
-function saveData(data: DataShape) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
-}
-
-/* ========== SVG Shapes ========== */
-
-function Shape({ shape, color, size }: { shape: MilestoneType['shape']; color: string; size: MilestoneType['size'] }) {
-  const px = size === 'small' ? 8 : size === 'medium' ? 12 : 16
-  const half = px / 2
-  const common = { fill: color, stroke: 'rgba(0,0,0,0.3)', strokeWidth: 1 }
-  if (shape === 'circle') return <circle cx={half} cy={half} r={half - 1} {...common} />
-  if (shape === 'square') return <rect x="1" y="1" width={px - 2} height={px - 2} rx="2" {...common} />
-  if (shape === 'triangle') return <polygon points={`${half},1 ${px - 1},${px - 1} 1,${px - 1}`} {...common} />
-  // diamond
-  return <polygon points={`${half},1 ${px - 1},${half} ${half},${px - 1} 1,${half}`} {...common} />
-}
-
-function ShapeIcon(props: React.ComponentProps<typeof Shape>) {
-  const px = props.size === 'small' ? 8 : props.size === 'medium' ? 12 : 16
-  return (
-    <svg width={px} height={px} className="inline-block align-middle">
-      <Shape {...props} />
-    </svg>
-  )
-}
-
-/* ========== Header & Tabs ========== */
-
-type Tab = 'unified' | 'teams' | 'projects' | 'reports'
-
-function Header({ active, setActive }: { active: Tab; setActive: (t: Tab) => void }) {
-  const tab = (id: Tab, label: string, Icon: any) => (
-    <button
-      onClick={() => setActive(id)}
-      className={`flex items-center gap-2 px-4 py-2 rounded-xl border transition
-        ${active === id ? 'bg-white text-pira-purple border-white shadow'
-        : 'bg-[#31297A] text-white/90 border-transparent hover:bg-[#3B338F]'}`}
-    >
-      <Icon size={18} />
-      <span className="font-semibold">{label}</span>
-    </button>
-  )
-
-  return (
-    <div className="shadow">
-      <div className="bg-pira-purple text-white">
-        <div className="max-w-6xl mx-auto px-4 py-5">
-          <h1 className="text-3xl font-bold tracking-wide">PIRA</h1>
-          <p className="text-white/90 -mt-1">Project IT Resource Availability</p>
-        </div>
-      </div>
-      <div className="bg-[#2A246F]">
-        <div className="max-w-6xl mx-auto px-4 py-3 flex gap-2 overflow-x-auto">
-          {tab('unified', 'Unified View', CalendarDays)}
-          {tab('teams', 'Teams', Users)}
-          {tab('projects', 'Projects', PlusCircle)}
-          {tab('reports', 'Reports', BarChart3)}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-/* ========== Legend Manager ========== */
-
-function LegendManager({
-  milestoneTypes,
-  setMilestoneTypes,
-  settings,
-  setSettings
+/** ========== NAV ========== */
+function Nav({
+  active,
+  onChange,
 }: {
-  milestoneTypes: MilestoneType[]
-  setMilestoneTypes: (f: (prev: MilestoneType[]) => MilestoneType[]) => void
-  settings: SettingsState
-  setSettings: (s: SettingsState) => void
+  active: string;
+  onChange: (k: string) => void;
 }) {
-  const updateType = (id: UUID, patch: Partial<MilestoneType>) => {
-    setMilestoneTypes(prev => prev.map(mt => mt.id === id ? { ...mt, ...patch } : mt))
-  }
-  const removeType = (id: UUID) => setMilestoneTypes(prev => prev.filter(mt => mt.id !== id))
-  const addType = () => setMilestoneTypes(prev => [...prev, { id: uid(), name: 'New Type', shape: 'diamond', color: '#6366F1', size: 'small' }])
+  const [store] = useStore();
 
   return (
-    <div className="bg-white rounded-xl shadow p-4 space-y-4">
-      <div className="flex items-center justify-between">
-        <h3 className="text-lg font-semibold">Legend: Milestone Types</h3>
-        <button className="px-3 py-1 bg-pira-accent text-white rounded" onClick={addType}>+ Add Type</button>
-      </div>
+    <div className="flex items-center justify-center gap-2 py-4">
+      <button
+        className={`pira-tab ${active === "unified" ? "active" : ""}`}
+        onClick={() => onChange("unified")}
+        title="Unified View"
+      >
+        <span>📅</span> Unified View
+      </button>
 
-      <div className="space-y-3">
-        {milestoneTypes.map(mt => (
-          <div key={mt.id} className="grid md:grid-cols-6 grid-cols-2 items-center gap-2 border rounded-lg p-3">
-            <div className="col-span-2">
-              <label className="text-xs text-gray-500">Name</label>
-              <input className="w-full border rounded px-2 py-1" value={mt.name}
-                onChange={e => updateType(mt.id, { name: e.target.value })} />
-            </div>
+      {/* Dynamic Team tabs */}
+      {store.teams.map((t) => (
+        <button
+          key={t.id}
+          className={`pira-tab ${active === t.id ? "active" : ""}`}
+          onClick={() => onChange(t.id)}
+          title={`${t.name} Team`}
+        >
+          <span>👥</span> {t.name}
+        </button>
+      ))}
 
-            <div>
-              <label className="text-xs text-gray-500">Shape</label>
-              <select className="w-full border rounded px-2 py-1" value={mt.shape}
-                onChange={e => updateType(mt.id, { shape: e.target.value as any })}>
-                <option value="diamond">diamond</option>
-                <option value="circle">circle</option>
-                <option value="triangle">triangle</option>
-                <option value="square">square</option>
-              </select>
-            </div>
+      <button
+        className={`pira-tab ${active === "teams" ? "active" : ""}`}
+        onClick={() => onChange("teams")}
+      >
+        <span>⚙️</span> Teams
+      </button>
 
-            <div>
-              <label className="text-xs text-gray-500">Size</label>
-              <select className="w-full border rounded px-2 py-1" value={mt.size}
-                onChange={e => updateType(mt.id, { size: e.target.value as any })}>
-                <option value="small">small</option>
-                <option value="medium">medium</option>
-                <option value="large">large</option>
-              </select>
-            </div>
+      <button
+        className={`pira-tab ${active === "projects" ? "active" : ""}`}
+        onClick={() => onChange("projects")}
+      >
+        <span>➕</span> Projects
+      </button>
 
-            <div>
-              <label className="text-xs text-gray-500">Color</label>
-              <input className="w-full border rounded h-9" type="color" value={mt.color}
-                onChange={e => updateType(mt.id, { color: e.target.value })} />
-            </div>
-
-            <div className="flex items-center gap-2">
-              <ShapeIcon shape={mt.shape} color={mt.color} size={mt.size} />
-              <button className="text-red-600 text-sm" onClick={() => removeType(mt.id)}>Delete</button>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      <div className="grid md:grid-cols-4 sm:grid-cols-2 gap-3 pt-3 border-t">
-        <div>
-          <label className="text-xs text-gray-500">Default Project Bar Color</label>
-          <input type="color" className="w-full h-10 border rounded" value={settings.defaultBarColor}
-            onChange={e => setSettings({ ...settings, defaultBarColor: e.target.value })} />
-        </div>
-
-        <Toggle label="Executive Mode" value={settings.executiveMode}
-          onChange={v => setSettings({ ...settings, executiveMode: v })} />
-        <Toggle label="Show Today Line" value={settings.todayLine}
-          onChange={v => setSettings({ ...settings, todayLine: v })} />
-        <Toggle label="Weekend Shading" value={settings.weekendShading}
-          onChange={v => setSettings({ ...settings, weekendShading: v })} />
-        <Toggle label="Snap to Grid" value={settings.snapToGrid}
-          onChange={v => setSettings({ ...settings, snapToGrid: v })} />
-      </div>
+      <button
+        className={`pira-tab ${active === "reports" ? "active" : ""}`}
+        onClick={() => onChange("reports")}
+      >
+        <span>📊</span> Reports
+      </button>
     </div>
-  )
+  );
 }
 
-function Toggle({ label, value, onChange }: { label: string; value: boolean; onChange: (v: boolean) => void }) {
+/** ========== LEGEND READ-ONLY ========== */
+function LegendStrip({ store }: { store: Store }) {
   return (
-    <label className="flex items-center gap-2 text-sm select-none">
-      <input type="checkbox" checked={value} onChange={e => onChange(e.target.checked)} />
-      {label}
-    </label>
-  )
+    <div className="flex flex-wrap gap-2 items-center">
+      {store.milestoneTypes.map((t) => (
+        <span key={t.id} className="legend-chip" title={t.name}>
+          <span
+            className={`inline-block ${shapeClass(t.shape)} ${sizeClass(t.size)}`}
+            style={{ backgroundColor: t.shape === "triangle" ? "transparent" : t.color, color: t.color }}
+          />
+          <span className="text-sm">{t.name}</span>
+        </span>
+      ))}
+      <span className="legend-chip">
+        <span className="w-4 h-2 rounded-sm" style={{ backgroundColor: store.settings.defaultBarColor }} />
+        Default Bar
+      </span>
+    </div>
+  );
 }
+const shapeClass = (s: MilestoneType["shape"]) =>
+  s === "diamond" ? "shape-diamond" : s === "circle" ? "shape-circle" : s === "triangle" ? "shape-triangle" : "shape-square";
+const sizeClass = (s: MilestoneType["size"]) =>
+  s === "small" ? "m-small" : s === "large" ? "m-large" : "m-medium";
 
-/* ========== Project Forms ========== */
+/** ========== TIMELINE ========== */
+type TimelineProps = {
+  store: Store;
+  filterTeamId?: ID;
+  onSettingsChange?: (s: Partial<Settings>) => void;
+};
 
-function ProjectForm({
-  teams, milestoneTypes, settings, onSave, initial
-}: {
-  teams: Team[]
-  milestoneTypes: MilestoneType[]
-  settings: SettingsState
-  onSave: (p: Project) => void
-  initial?: Project
-}) {
-  const [name, setName] = React.useState(initial?.name || '')
-  const [priority, setPriority] = React.useState(initial?.priority ?? 3)
-  const [status, setStatus] = React.useState(initial?.status || 'In Progress')
-  const [start, setStart] = React.useState(initial?.start || toISO(new Date()))
-  const [due, setDue] = React.useState(initial?.due || toISO(new Date(Date.now() + 14 * ONE_DAY)))
-  const [assignees, setAssignees] = React.useState<string[]>(initial?.assigneeIds || [])
-  const [barColor, setBarColor] = React.useState<string>(initial?.barColor || '')
-  const [milestones, setMilestones] = React.useState<Milestone[]>(initial?.milestones || [])
+function Timeline({ store, filterTeamId, onSettingsChange }: TimelineProps) {
+  const { settings } = store;
+  const pxPerDay = settings.pxPerDay;
 
-  const allMembers = React.useMemo(() =>
-    teams.flatMap(t => t.members.map(m => ({ id: `${t.id}:${m}`, teamName: t.name, name: m }))), [teams])
+  // Window controls (date inputs stored as UTC-noon ms)
+  const [winStart, setWinStart] = useState<number>(() => {
+    // Default to ~5 months span
+    const today = todayUTCNoon();
+    return today - 14 * 7 * MS_PER_DAY;
+  });
+  const [winEnd, setWinEnd] = useState<number>(() => {
+    const today = todayUTCNoon();
+    return today + 20 * 7 * MS_PER_DAY;
+  });
 
-  const addMilestone = () => setMilestones(prev => [...prev, {
-    id: uid(), typeId: milestoneTypes[0]?.id || uid(), date: toISO(new Date())
-  }])
+  const teams = filterTeamId
+    ? store.teams.filter((t) => t.id === filterTeamId)
+    : store.teams;
 
-  const updateMilestone = (id: string, patch: Partial<Milestone>) =>
-    setMilestones(prev => prev.map(m => m.id === id ? { ...m, ...patch } : m))
-
-  const removeMilestone = (id: string) => setMilestones(prev => prev.filter(m => m.id !== id))
-
-  const submit = () => {
-    if (new Date(due) < new Date(start)) {
-      alert('Warning: Due date is earlier than Start date.')
+  const membersByTeam = useMemo(() => {
+    const map: Record<ID, Member[]> = {};
+    for (const t of teams) map[t.id] = [];
+    for (const m of store.members) {
+      if (map[m.teamId]) map[m.teamId].push(m);
     }
-    const p: Project = {
-      id: initial?.id || uid(),
-      name,
-      priority,
-      status,
-      start, due,
-      assigneeIds: assignees,
-      barColor: barColor || undefined,
-      milestones,
-      history: initial?.history || []
-    }
-    if (initial && initial.due !== due) {
-      p.history = [...(p.history || []), { ts: new Date().toISOString(), field: 'due', oldVal: initial.due, newVal: due }]
-    }
-    onSave(p)
-  }
+    for (const t of teams) map[t.id].sort((a, b) => a.name.localeCompare(b.name));
+    return map;
+  }, [teams, store.members]);
 
-  return (
-    <div className="space-y-4">
-      <div className="grid sm:grid-cols-3 gap-3">
-        <div>
-          <label className="text-xs text-gray-500">Name</label>
-          <input className="w-full border rounded px-2 py-1" value={name} onChange={e => setName(e.target.value)} />
-        </div>
-        <div>
-          <label className="text-xs text-gray-500">Priority (1 highest)</label>
-          <input type="number" min={1} max={99} className="w-full border rounded px-2 py-1" value={priority}
-            onChange={e => setPriority(parseInt(e.target.value || '1'))} />
-        </div>
-        <div>
-          <label className="text-xs text-gray-500">Status</label>
-          <select className="w-full border rounded px-2 py-1" value={status} onChange={e => setStatus(e.target.value)}>
-            <option>In Progress</option><option>Stabilization</option><option>On Hold</option><option>Complete</option>
-          </select>
-        </div>
-        <div>
-          <label className="text-xs text-gray-500">Start</label>
-          <input type="date" className="w-full border rounded px-2 py-1" value={start} onChange={e => setStart(e.target.value)} />
-        </div>
-        <div>
-          <label className="text-xs text-gray-500">Due</label>
-          <input type="date" className="w-full border rounded px-2 py-1" value={due} onChange={e => setDue(e.target.value)} />
-        </div>
-        <div>
-          <label className="text-xs text-gray-500">Bar Color (override)</label>
-          <input type="color" className="w-full h-9 border rounded" value={barColor || settings.defaultBarColor}
-            onChange={e => setBarColor(e.target.value)} />
-        </div>
-      </div>
+  const milestones = store.milestones;
+  const mTypeById = useMemo(() => {
+    const r: Record<ID, MilestoneType> = {};
+    store.milestoneTypes.forEach((mt) => (r[mt.id] = mt));
+    return r;
+  }, [store.milestoneTypes]);
 
-      <div>
-        <label className="text-xs text-gray-500">Assigned Members</label>
-        <select multiple className="w-full border rounded px-2 py-2 h-28"
-          value={assignees} onChange={e => {
-            const options = Array.from(e.target.selectedOptions).map(o => o.value)
-            setAssignees(options)
-          }}>
-          {allMembers.map(m => (
-            <option key={m.id} value={m.id}>{m.name} ({m.teamName})</option>
-          ))}
+  // Pre-compute project bars per member
+  const projectsPerMember: Record<ID, Project[]> = useMemo(() => {
+    const byMember: Record<ID, Project[]> = {};
+    store.members.forEach((m) => (byMember[m.id] = []));
+    for (const p of store.projects) {
+      for (const mid of p.assigneeIds) {
+        if (byMember[mid]) byMember[mid].push(p);
+      }
+    }
+    // stable order by start date
+    Object.values(byMember).forEach((arr) =>
+      arr.sort((a, b) => a.startMs - b.startMs)
+    );
+    return byMember;
+  }, [store.projects, store.members]);
+
+  // Ticks
+  const weekTicks = weeklyTicks(winStart, winEnd);
+  const monthTicks = monthlyTicks(winStart, winEnd);
+
+  // Export full range to a printable window (vector SVG)
+  const exportPDF = () => {
+    const w = Math.ceil(((winEnd - winStart) / MS_PER_DAY + 1) * pxPerDay) + 400; // extra gutter for labels
+    const h =
+      120 + // header
+      teams.reduce((acc, t) => acc + 48 + (membersByTeam[t.id].length || 1) * 80, 0);
+
+    const printWin = window.open("", "_blank");
+    if (!printWin) return;
+
+    const svgStart = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="font-family: Candara, Segoe UI, Inter, system-ui, -apple-system, sans-serif">
+        <style>
+          .lbl{font-size:12px;fill:#111827}
+          .tick{stroke:#CBD5E1;stroke-width:1}
+          .today{stroke:#111827;stroke-width:2}
+          .bar{rx:6;ry:6}
+        </style>
+    `;
+    const svgParts: string[] = [svgStart];
+
+    // Header
+    svgParts.push(
+      `<text x="${w / 2}" y="32" text-anchor="middle" class="lbl" style="font-size:20px;font-weight:700">PIRA • Timeline Export (${formatInput(winStart)} → ${formatInput(winEnd)})</text>`
+    );
+
+    let y = 60;
+
+    // Draw each team section
+    for (const t of teams) {
+      // Team label
+      svgParts.push(
+        `<rect x="0" y="${y}" width="${w}" height="32" fill="#EEF2FF"/>`,
+        `<text x="16" y="${y + 22}" class="lbl" style="font-weight:600">${t.name}</text>`
+      );
+      y += 32;
+
+      const members = membersByTeam[t.id];
+      if (members.length === 0) {
+        svgParts.push(
+          `<text x="16" y="${y + 40}" class="lbl" fill="#64748B">No members</text>`
+        );
+        y += 80;
+        continue;
+      }
+
+      for (const member of members) {
+        // name or masked
+        const name = store.settings.executiveMode
+          ? maskedName(member, members)
+          : member.name;
+
+        // row background
+        svgParts.push(
+          `<rect x="0" y="${y}" width="${w}" height="80" fill="${(members.indexOf(member) % 2 === 0) ? '#FFFFFF' : '#FAFAFF'}"/>`,
+          `<text x="16" y="${y + 28}" class="lbl" style="font-weight:600">${name}</text>`
+        );
+
+        // grid weekly ticks
+        for (const t of weekTicks) {
+          const x = xFromDate(t, winStart, pxPerDay) + 240;
+          svgParts.push(`<line x1="${x}" y1="${y}" x2="${x}" y2="${y + 80}" class="tick"/>`);
+        }
+
+        // weekend shading (approximate by shading Sat+Sun areas; omitted for brevity in SVG)
+
+        // bars for this member
+        const projs = projectsPerMember[member.id] || [];
+        for (const p of projs) {
+          const x = xFromDate(p.startMs, winStart, pxPerDay) + 240;
+          const wBar = widthFromDates(p.startMs, p.dueMs, pxPerDay);
+          const color = p.barColor || store.settings.defaultBarColor;
+
+          svgParts.push(
+            `<rect x="${x}" y="${y + 40}" width="${wBar}" height="16" fill="${color}" class="bar"/>`,
+            `<text x="${x + 6}" y="${y + 52}" class="lbl" fill="#ffffff">${p.name} • P${p.priority}</text>`
+          );
+
+          // milestones
+          for (const mid of p.milestoneIds) {
+            const m = store.milestones[mid];
+            if (!m) continue;
+            const mt = mTypeById[m.typeId];
+            const mx = xFromDate(m.dateMs, winStart, pxPerDay) + 240;
+
+            const mark =
+              mt.shape === "triangle"
+                ? `<polygon points="${mx},${y + 38} ${mx - 6},${y + 52} ${mx + 6},${y + 52}" fill="${mt.color}" />`
+                : `<rect x="${mx - 4}" y="${y + 40 - 4}" width="8" height="8" fill="${mt.color}" transform="rotate(45 ${mx} ${y + 40})"/>`;
+
+            svgParts.push(mark);
+          }
+        }
+
+        y += 80;
+      }
+    }
+
+    // month labels row
+    const monthY = 52;
+    for (const t of monthTicks) {
+      const x = xFromDate(t, winStart, pxPerDay) + 240;
+      const d = new Date(t);
+      svgParts.push(
+        `<text x="${x + 4}" y="${monthY}" class="lbl" fill="#475569">${d.toLocaleString('en', { month: 'numeric', day: 'numeric' })}</text>`
+      );
+    }
+
+    // today line
+    if (store.settings.showToday) {
+      const tx = xFromDate(todayUTCNoon(), winStart, pxPerDay) + 240;
+      svgParts.push(`<line x1="${tx}" y1="60" x2="${tx}" y2="${y}" class="today" />`);
+    }
+
+    svgParts.push("</svg>");
+
+    printWin.document.write(svgParts.join(""));
+    printWin.document.close();
+    // The user can use the browser's Print dialog and "Save as PDF"
+  };
+
+  // UI controls row
+  const Controls = (
+    <div className="flex flex-wrap items-center gap-4 rounded-card bg-white shadow-soft px-4 py-3 mb-4">
+      <div className="flex items-center gap-2">
+        <label className="text-sm">Time Scale</label>
+        <select
+          className="rounded-md border px-2 h-9"
+          value={settings.timeScale}
+          onChange={(e) => onSettingsChange?.({ timeScale: e.target.value as Settings["timeScale"] })}
+        >
+          <option>Days</option>
+          <option>Weeks</option>
+          <option>Months</option>
+          <option>Quarter</option>
+          <option>Year</option>
         </select>
       </div>
 
-      <div className="bg-gray-50 rounded-lg p-3 space-y-2">
-        <div className="flex items-center justify-between">
-          <h4 className="font-semibold">Milestones</h4>
-          <button className="px-3 py-1 bg-pira-accent text-white rounded" onClick={addMilestone}>+ Add Milestone</button>
-        </div>
-        {milestones.length === 0 && <p className="text-sm text-gray-500">No milestones yet.</p>}
-        {milestones.map(m => (
-          <div key={m.id} className="grid md:grid-cols-4 gap-2 items-end">
-            <div>
-              <label className="text-xs text-gray-500">Type</label>
-              <select className="w-full border rounded px-2 py-1" value={m.typeId}
-                onChange={e => updateMilestone(m.id, { typeId: e.target.value })}>
-                {milestoneTypes.map(mt => <option key={mt.id} value={mt.id}>{mt.name}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="text-xs text-gray-500">Date</label>
-              <input type="date" className="w-full border rounded px-2 py-1" value={m.date}
-                onChange={e => updateMilestone(m.id, { date: e.target.value })} />
-            </div>
-            <div>
-              <label className="text-xs text-gray-500">Label (optional)</label>
-              <input className="w-full border rounded px-2 py-1" value={m.label || ''}
-                onChange={e => updateMilestone(m.id, { label: e.target.value })} />
-            </div>
-            <div className="flex items-center gap-3">
-              <PreviewMilestone milestone={m} types={milestoneTypes} />
-              <button className="text-red-600 text-sm" onClick={() => removeMilestone(m.id)}>Delete</button>
-            </div>
-          </div>
-        ))}
+      <div className="flex items-center gap-2">
+        <span className="text-sm">Start</span>
+        <input
+          type="date"
+          className="rounded-md border px-2 h-9"
+          value={formatInput(winStart)}
+          onChange={(e) => setWinStart(toEpochUTCNoon(e.target.value))}
+        />
+        <span className="text-sm">End</span>
+        <input
+          type="date"
+          className="rounded-md border px-2 h-9"
+          value={formatInput(winEnd)}
+          onChange={(e) => setWinEnd(toEpochUTCNoon(e.target.value))}
+        />
       </div>
 
-      <div className="flex justify-end gap-3">
-        <button className="px-4 py-2 rounded bg-gray-200">Cancel</button>
-        <button className="px-4 py-2 rounded bg-pira-accent text-white" onClick={submit}>
-          {initial ? 'Save Changes' : 'Create Project'}
+      <label className="inline-flex items-center gap-2">
+        <input
+          type="checkbox"
+          checked={settings.executiveMode}
+          onChange={(e) => onSettingsChange?.({ executiveMode: e.target.checked })}
+        />
+        Executive Mode
+      </label>
+      <label className="inline-flex items-center gap-2">
+        <input
+          type="checkbox"
+          checked={settings.weekendShading}
+          onChange={(e) => onSettingsChange?.({ weekendShading: e.target.checked })}
+        />
+        Weekend Shading
+      </label>
+      <label className="inline-flex items-center gap-2">
+        <input
+          type="checkbox"
+          checked={true}
+          readOnly
+        />
+        Snap to Grid
+      </label>
+
+      <div className="ml-auto">
+        <button
+          onClick={exportPDF}
+          className="px-4 h-9 rounded-md bg-pira.chip text-white hover:opacity-90"
+        >
+          Export PDF (Full Range)
         </button>
       </div>
     </div>
-  )
-}
+  );
 
-function PreviewMilestone({ milestone, types }: { milestone: Milestone; types: MilestoneType[] }) {
-  const mt = types.find(t => t.id === milestone.typeId)
-  if (!mt) return null
-  return <ShapeIcon shape={mt.shape} color={mt.color} size={mt.size} />
-}
-
-/* ========== Timeline rendering helpers ========== */
-
-type Col = { start: Date; end: Date; label: string; width: number }
-
-function buildColumns(scale: SettingsState['timeScale'], start: Date, end: Date): Col[] {
-  const cols: Col[] = []
-  const s = new Date(start); s.setHours(0,0,0,0)
-  const e = new Date(end);   e.setHours(0,0,0,0)
-
-  if (scale === 'days') {
-    for (let d = new Date(s); d <= e; d = new Date(d.getTime() + ONE_DAY)) {
-      const sd = new Date(d)
-      const ed = new Date(d.getTime() + ONE_DAY)
-      cols.push({ start: sd, end: ed, label: formatMMDD(sd), width: 30 })
-    }
-  } else if (scale === 'weeks') {
-    const startOfWeek = new Date(s.getTime() - (s.getDay()) * ONE_DAY) // Sunday
-    for (let d = startOfWeek; d <= e; d = new Date(d.getTime() + 7 * ONE_DAY)) {
-      const sd = new Date(d)
-      const ed = new Date(d.getTime() + 7 * ONE_DAY)
-      cols.push({ start: sd, end: ed, label: formatMMDD(sd), width: 80 })
-    }
-  } else if (scale === 'months') {
-    for (let d = new Date(s.getFullYear(), s.getMonth(), 1); d <= e; d.setMonth(d.getMonth() + 1)) {
-      const sd = new Date(d)
-      const ed = new Date(sd.getFullYear(), sd.getMonth() + 1, 1)
-      cols.push({ start: sd, end: ed, label: sd.toLocaleDateString('en-US', { month: 'short', year: '2-digit' }), width: 120 })
-    }
-  } else if (scale === 'quarters') {
-    const startQ = Math.floor(s.getMonth() / 3)
-    for (let y = s.getFullYear(); y <= e.getFullYear(); y++) {
-      for (let q = (y === s.getFullYear() ? startQ : 0); q < 4; q++) {
-        const sd = new Date(y, q * 3, 1)
-        if (sd > e) break
-        const ed = new Date(y, q * 3 + 3, 1)
-        cols.push({ start: sd, end: ed, label: `Q${q + 1} ${String(y).slice(2)}`, width: 160 })
-      }
-    }
-  } else { // years
-    for (let y = s.getFullYear(); y <= e.getFullYear(); y++) {
-      const sd = new Date(y, 0, 1)
-      const ed = new Date(y + 1, 0, 1)
-      cols.push({ start: sd, end: ed, label: `${y}`, width: 200 })
-    }
-  }
-  return cols
-}
-
-function projectPosition(p: Project, cols: Col[]) {
-  const winStart = cols[0]?.start ?? fromISO(p.start)
-  const winEnd = cols[cols.length - 1]?.end ?? new Date(fromISO(p.due).getTime() + ONE_DAY)
-
-  const s = fromISO(p.start)
-  const d = fromISO(p.due)
-  const dur = (d.getTime() + ONE_DAY) - s.getTime() // inclusive end
-  const total = winEnd.getTime() - winStart.getTime()
-
-  const left = clamp(((s.getTime() - winStart.getTime()) / total) * 100, 0, 100)
-  const width = clamp((dur / total) * 100, 0, 100 - left)
-  return { left: `${left}%`, width: `${Math.max(width, 1)}%` }
-}
-
-/* ========== Unified View (Team -> Member) ========== */
-
-function UnifiedView({
-  teams, projects, milestoneTypes, settings, setSettings
-}: {
-  teams: Team[]
-  projects: Project[]
-  milestoneTypes: MilestoneType[]
-  settings: SettingsState
-  setSettings: (s: SettingsState) => void
-}) {
-  const [range, setRange] = React.useState<{ start: string; end: string }>(() => {
-    const start = toISO(new Date(Date.now() - 30 * ONE_DAY))
-    const end = toISO(new Date(Date.now() + 120 * ONE_DAY))
-    return { start, end }
-  })
-
-  const cols = React.useMemo(() => buildColumns(settings.timeScale, fromISO(range.start), fromISO(range.end)),
-    [settings.timeScale, range])
-
-  const todayPct = React.useMemo(() => {
-    const today = new Date(); today.setHours(0,0,0,0)
-    const s = cols[0]?.start, e = cols[cols.length - 1]?.end
-    if (!s || !e || today < s || today > e) return -1
-    return ((today.getTime() - s.getTime()) / (e.getTime() - s.getTime())) * 100
-  }, [cols])
-
+  // Timeline rows (HTML/SVG hybrid with absolute elements; fixed day width; horizontal scroll)
   return (
-    <div className="max-w-6xl mx-auto p-4 space-y-4">
-      <div className="bg-white rounded-xl shadow p-3 flex flex-wrap gap-3 items-end">
-        <div>
-          <label className="text-xs text-gray-500">Time Scale</label>
-          <select className="border rounded px-2 py-1" value={settings.timeScale}
-            onChange={e => setSettings({ ...settings, timeScale: e.target.value as any })}>
-            <option value="days">Days</option>
-            <option value="weeks">Weeks</option>
-            <option value="months">Months</option>
-            <option value="quarters">Quarters</option>
-            <option value="years">Years</option>
-          </select>
-        </div>
-        <div>
-          <label className="text-xs text-gray-500">Start</label>
-          <input type="date" className="border rounded px-2 py-1" value={range.start}
-            onChange={e => setRange(r => ({ ...r, start: e.target.value }))} />
-        </div>
-        <div>
-          <label className="text-xs text-gray-500">End</label>
-          <input type="date" className="border rounded px-2 py-1" value={range.end}
-            onChange={e => setRange(r => ({ ...r, end: e.target.value }))} />
-        </div>
-        <Toggle label="Executive Mode" value={settings.executiveMode}
-          onChange={v => setSettings({ ...settings, executiveMode: v })} />
-        <Toggle label="Weekend Shading" value={settings.weekendShading}
-          onChange={v => setSettings({ ...settings, weekendShading: v })} />
-        <Toggle label="Snap to Grid" value={settings.snapToGrid}
-          onChange={v => setSettings({ ...settings, snapToGrid: v })} />
+    <div>
+      <div className="mb-4 flex items-center justify-between">
+        <LegendStrip store={store} />
       </div>
 
-      <div className="bg-white rounded-xl shadow overflow-hidden">
-        {/* Header scale */}
-        <div className="border-b bg-gray-50 p-3">
-          <div className="flex">
-            <div className="w-64 font-medium">Team / Members</div>
-            <div className="flex-1 relative">
-              <div className="flex border-l">
-                {cols.map((c, i) => (
-                  <div key={i} className="border-r border-gray-200 text-center text-xs font-medium py-2"
-                    style={{ minWidth: `${c.width}px` }}>{c.label}</div>
-                ))}
-              </div>
-            </div>
-          </div>
+      {Controls}
+
+      <div className="timeline-shell relative">
+        {/* Sticky left column width (names) */}
+        <div className="relative">
+          {teams.map((team) => (
+            <TeamSection
+              key={team.id}
+              team={team}
+              members={membersByTeam[team.id]}
+              projectsPerMember={projectsPerMember}
+              settings={settings}
+              mTypeById={mTypeById}
+              milestones={milestones}
+              winStart={winStart}
+              winEnd={winEnd}
+            />
+          ))}
         </div>
+      </div>
+    </div>
+  );
+}
 
-        {/* Body */}
-        <div>
-          {teams.map(team => {
-            const teamMembers = team.members
-            return (
-              <div key={team.id} className="border-b">
-                <div className="bg-indigo-50 px-4 py-2 font-semibold text-indigo-700">{team.name}</div>
+function TeamSection(props: {
+  team: Team;
+  members: Member[];
+  projectsPerMember: Record<ID, Project[]>;
+  settings: Settings;
+  mTypeById: Record<ID, MilestoneType>;
+  milestones: Record<ID, Milestone>;
+  winStart: number;
+  winEnd: number;
+}) {
+  const {
+    team,
+    members,
+    projectsPerMember,
+    settings,
+    mTypeById,
+    milestones,
+    winStart,
+    winEnd,
+  } = props;
 
-                {teamMembers.length === 0 && (
-                  <div className="flex">
-                    <div className="w-64 p-3 text-gray-500">No members</div>
-                    <div className="flex-1 p-3 border-l">No projects</div>
-                  </div>
-                )}
+  const pxPerDay = settings.pxPerDay;
+  const widthPx = Math.ceil(((winEnd - winStart) / MS_PER_DAY + 1) * pxPerDay);
+  const leftGutter = 240; // sticky name column width
 
-                {teamMembers.map((member, idx) => {
-                  const memberIdPrefix = `${team.id}:${member}`
-                  const memberProjects = projects.filter(p => p.assigneeIds.some(id => id === memberIdPrefix))
-                  const nameText = settings.executiveMode ? `Resource ${idx + 1}` : member
+  const weekTicksArr = weeklyTicks(winStart, winEnd);
+  const todayX = xFromDate(todayUTCNoon(), winStart, pxPerDay);
 
-                  return (
-                    <div key={member} className="flex border-t">
-                      <div className="w-64 p-3">
-                        <div className="font-medium">{nameText}</div>
-                        <div className="text-xs text-gray-500">{memberProjects.length} project{memberProjects.length === 1 ? '' : 's'}</div>
-                      </div>
-                      <div className="flex-1 relative h-12 border-l overflow-hidden">
-                        {/* grid & weekend shading */}
-                        {cols.map((c, i) => (
-                          <div key={i} className={`absolute top-0 bottom-0 border-r border-gray-200`}
-                            style={{ left: `${(i / cols.length) * 100}%`, width: `${100 / cols.length}%`,
-                              background: settings.weekendShading && (c.start.getDay() === 0 || c.start.getDay() === 6) && settings.timeScale==='days'
-                                ? 'rgba(0,0,0,0.03)' : undefined }} />
-                        ))}
-                        {/* Today line */}
-                        {settings.todayLine && todayPct >= 0 && (
-                          <div className="absolute top-0 bottom-0 w-0.5 bg-black/70" style={{ left: `${todayPct}%` }} />
-                        )}
+  return (
+    <div className="border-b border-slate-200">
+      {/* Team header row */}
+      <div className="bg-indigo-50 text-indigo-900 font-semibold px-4 py-2 rounded-t-card">
+        {team.name}
+      </div>
 
-                        {/* Project bars for this member */}
-                        {memberProjects.map(p => {
-                          const pos = projectPosition(p, cols)
+      {/* Rows */}
+      <div
+        className="relative"
+        style={{
+          width: "100%",
+        }}
+      >
+        {/* Horizontal scroll area for the grid+bars */}
+        <div
+          className="relative"
+          style={{
+            marginLeft: leftGutter,
+            overflowX: "auto",
+            position: "relative",
+          }}
+        >
+          <div className="relative" style={{ width: widthPx }}>
+            {/* Month labels */}
+            <MonthLabels winStart={winStart} winEnd={winEnd} pxPerDay={pxPerDay} />
+
+            {/* Today line */}
+            {settings.showToday && (
+              <div
+                className="vline"
+                style={{ left: todayX, top: 0, bottom: 0 }}
+              />
+            )}
+
+            {/* Rows with ticks and bars */}
+            {members.map((m, idx) => {
+              const projs = projectsPerMember[m.id] || [];
+              const rowTop = 38 + idx * 96;
+
+              return (
+                <div key={m.id} className="relative h-24">
+                  {/* Weekly ticks */}
+                  {weekTicksArr.map((t) => {
+                    const x = xFromDate(t, winStart, pxPerDay);
+                    return (
+                      <div
+                        key={t}
+                        className="absolute top-0 bottom-0 border-l border-pira-grid/80"
+                        style={{ left: x }}
+                      />
+                    );
+                  })}
+
+                  {/* Bars */}
+                  {projs.map((p) => {
+                    const x = xFromDate(p.startMs, winStart, pxPerDay);
+                    const w = widthFromDates(p.startMs, p.dueMs, pxPerDay);
+                    const color = p.barColor || settings.defaultBarColor;
+
+                    return (
+                      <div
+                        key={p.id}
+                        className="absolute"
+                        style={{ left: x, top: rowTop, width: w }}
+                      >
+                        <div
+                          className="h-4 rounded-full"
+                          style={{ backgroundColor: color }}
+                          title={`${p.name} (P${p.priority})`}
+                        />
+                        <div className="text-xs mt-1 text-slate-600">
+                          {p.name} • P{p.priority}
+                        </div>
+
+                        {/* Milestones */}
+                        {p.milestoneIds.map((mid) => {
+                          const m = milestones[mid];
+                          if (!m) return null;
+                          const mt = mTypeById[m.typeId];
+                          const mx = xFromDate(m.dateMs, winStart, pxPerDay);
+
                           return (
-                            <Bar key={p.id} project={p} pos={pos} cols={cols} milestoneTypes={milestoneTypes} settings={settings} />
-                          )
+                            <span
+                              key={mid}
+                              className={`absolute ${shapeClass(mt.shape)} ${sizeClass(mt.size)}`}
+                              style={{
+                                left: mx - x - 6, // local offset inside bar container
+                                top: -6,
+                                backgroundColor: mt.shape === "triangle" ? "transparent" : mt.color,
+                                color: mt.color,
+                              }}
+                              title={`${mt.name} • ${formatInput(m.dateMs)}${m.label ? " • " + m.label : ""}`}
+                            />
+                          );
                         })}
                       </div>
-                    </div>
-                  )
-                })}
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Sticky name column (left) */}
+        <div
+          className="timeline-sticky"
+          style={{
+            width: leftGutter,
+            position: "absolute",
+            left: 0,
+            top: 0,
+            bottom: 0,
+          }}
+        >
+          {/* Column header */}
+          <div className="h-10 flex items-center pl-4 text-slate-600">
+            Team / Members
+          </div>
+          {/* Member labels */}
+          {members.map((m, idx) => (
+            <div key={m.id} className="h-24 flex items-center pl-4">
+              <div className="leading-tight">
+                <div className="font-semibold">
+                  {props.settings.executiveMode
+                    ? maskedName(m, members)
+                    : m.name}
+                </div>
+                <div className="text-xs text-slate-500">
+                  {(props.projectsPerMember[m.id]?.length || 0)} project
+                  {((props.projectsPerMember[m.id]?.length || 0) === 1) ? "" : "s"}
+                </div>
               </div>
-            )
-          })}
+            </div>
+          ))}
         </div>
       </div>
     </div>
-  )
+  );
 }
 
-/* ========== Draggable/Resizable Bar ========== */
-
-function Bar({
-  project, pos, cols, milestoneTypes, settings
+function MonthLabels({
+  winStart,
+  winEnd,
+  pxPerDay,
 }: {
-  project: Project
-  pos: { left: string; width: string }
-  cols: Col[]
-  milestoneTypes: MilestoneType[]
-  settings: SettingsState
+  winStart: number;
+  winEnd: number;
+  pxPerDay: number;
 }) {
-  const [drag, setDrag] = React.useState<null | { startX: number; origStart: Date; origDue: Date; mode: 'move' | 'left' | 'right' }>(null)
-
-  const barColor = project.barColor || '#5B6BFF'
-
-  const onMouseDown = (mode: 'move' | 'left' | 'right') => (e: React.MouseEvent) => {
-    e.preventDefault()
-    setDrag({ startX: e.clientX, origStart: fromISO(project.start), origDue: fromISO(project.due), mode })
-  }
-
-  React.useEffect(() => {
-    function onMove(e: MouseEvent) {
-      if (!drag) return
-      const container = (e.target as HTMLElement).closest('.timeline-row') as HTMLElement | null
-      const row = container ?? document.body
-      const rect = (row as HTMLElement).getBoundingClientRect ? (row as HTMLElement).getBoundingClientRect() : { width: window.innerWidth, left: 0 }
-      const totalMs = cols[cols.length - 1].end.getTime() - cols[0].start.getTime()
-      const pxPerMs = rect.width / totalMs
-      const deltaMs = (e.clientX - drag.startX) / pxPerMs
-
-      let newStart = new Date(drag.origStart.getTime())
-      let newDue = new Date(drag.origDue.getTime())
-
-      if (drag.mode === 'move') {
-        newStart = new Date(drag.origStart.getTime() + deltaMs)
-        newDue = new Date(drag.origDue.getTime() + deltaMs)
-      } else if (drag.mode === 'left') {
-        newStart = new Date(drag.origStart.getTime() + deltaMs)
-      } else {
-        newDue = new Date(drag.origDue.getTime() + deltaMs)
-      }
-
-      if (settings.snapToGrid) {
-        const snap = (d: Date) => new Date(toISO(d))
-        newStart = snap(newStart)
-        newDue = snap(newDue)
-      }
-
-      // write back to storage live (auto-save feel)
-      const raw = loadData()
-      const idx = raw.projects.findIndex(pp => pp.id === project.id)
-      if (idx >= 0) {
-        raw.projects[idx].start = toISO(newStart)
-        raw.projects[idx].due = toISO(newDue)
-        saveData(raw)
-      }
-    }
-    function onUp() { setDrag(null) }
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-    return () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp) }
-  }, [drag, cols, project.id, settings.snapToGrid])
-
-  // resolve milestone visuals from legend
-  const mType = (name: string) => milestoneTypes.find(mt => mt.name.toLowerCase() === name.toLowerCase())
-  const startType = mType('Start Date') || milestoneTypes[0]
-  const dueType = mType('Due Date') || milestoneTypes[0]
-
-  const inRow = "absolute top-1/2 -translate-y-1/2 h-4 rounded px-2 flex items-center justify-between text-white timeline-row"
-
+  const ticks = monthlyTicks(winStart, winEnd);
   return (
-    <div className={inRow} style={{ left: pos.left, width: pos.width, backgroundColor: barColor, minWidth: '20px' }}>
-      {/* left handle */}
-      <div className="w-2 cursor-ew-resize" onMouseDown={onMouseDown('left')} />
-      <div className="flex items-center gap-1 text-[10px] whitespace-nowrap">
-        <span className="font-semibold">{project.name}</span>
-        <span>• P{project.priority}</span>
-      </div>
-      {/* start / due markers */}
-      <div className="absolute left-0 -translate-x-1/2">
-        <ShapeIcon shape={startType.shape} color={startType.color} size={startType.size} />
-      </div>
-      <div className="absolute right-0 translate-x-1/2">
-        <ShapeIcon shape={dueType.shape} color={dueType.color} size={dueType.size} />
-      </div>
-      {/* right handle */}
-      <div className="w-2 cursor-ew-resize" onMouseDown={onMouseDown('right')} />
-      {/* move area */}
-      <div className="absolute inset-0 cursor-grab" onMouseDown={onMouseDown('move')} />
-    </div>
-  )
-}
-
-/* ========== Teams Tab (simple manager) ========== */
-
-function TeamsManager({ teams, setTeams }: { teams: Team[]; setTeams: (f: (prev: Team[]) => Team[]) => void }) {
-  const [newTeam, setNewTeam] = React.useState('')
-  const addTeam = () => { if (!newTeam.trim()) return; setTeams(prev => [...prev, { id: uid(), name: newTeam.trim(), members: [] }]); setNewTeam('') }
-  const addMember = (teamId: string, name: string) => {
-    if (!name.trim()) return
-    setTeams(prev => prev.map(t => t.id === teamId ? { ...t, members: [...t.members, name.trim()] } : t))
-  }
-  const removeMember = (teamId: string, name: string) =>
-    setTeams(prev => prev.map(t => t.id === teamId ? { ...t, members: t.members.filter(m => m !== name) } : t))
-  const renameTeam = (teamId: string, name: string) =>
-    setTeams(prev => prev.map(t => t.id === teamId ? { ...t, name } : t))
-  const deleteTeam = (teamId: string) =>
-    setTeams(prev => prev.filter(t => t.id !== teamId))
-
-  return (
-    <div className="max-w-5xl mx-auto p-4 space-y-4">
-      <div className="bg-white rounded-xl shadow p-3">
-        <div className="flex gap-2">
-          <input className="border rounded px-2 py-1 flex-1" placeholder="Team name" value={newTeam} onChange={e => setNewTeam(e.target.value)} />
-          <button className="px-3 py-1 bg-pira-accent text-white rounded" onClick={addTeam}>Add Team</button>
-        </div>
-      </div>
-
-      {teams.map(team => (
-        <div key={team.id} className="bg-white rounded-xl shadow p-4 space-y-3">
-          <div className="flex items-center gap-3">
-            <input className="text-xl font-semibold flex-1 border rounded px-2 py-1" value={team.name}
-              onChange={e => renameTeam(team.id, e.target.value)} />
-            <button className="text-red-600" onClick={() => deleteTeam(team.id)}>Delete</button>
+    <div className="relative h-10">
+      {ticks.map((t) => {
+        const x = xFromDate(t, winStart, pxPerDay);
+        const d = new Date(t);
+        const txt = `${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
+        return (
+          <div key={t} className="absolute top-2 text-xs text-slate-600" style={{ left: x + 4 }}>
+            {txt}
           </div>
-          <div className="flex flex-wrap gap-2">
-            {team.members.map((m, idx) => (
-              <span key={m} className="px-2 py-1 bg-blue-100 text-blue-800 rounded">
-                {m}
-                <button className="ml-2 text-blue-800/70" onClick={() => removeMember(team.id, m)}>x</button>
-              </span>
-            ))}
-          </div>
-          <AddMemberRow onAdd={(name) => addMember(team.id, name)} />
-        </div>
-      ))}
+        );
+      })}
     </div>
-  )
+  );
 }
 
-function AddMemberRow({ onAdd }: { onAdd: (name: string) => void }) {
-  const [name, setName] = React.useState('')
-  return (
-    <div className="flex gap-2">
-      <input className="border rounded px-2 py-1 flex-1" placeholder="New member name" value={name} onChange={e => setName(e.target.value)} />
-      <button className="px-3 py-1 bg-green-600 text-white rounded" onClick={() => { onAdd(name); setName('') }}>Add Member</button>
-    </div>
-  )
+/** Masked names for Executive Mode (stable order per team) */
+function maskedName(member: Member, teamMembers: Member[]) {
+  const idx = teamMembers.findIndex((m) => m.id === member.id);
+  return `Resource ${idx + 1}`;
 }
 
-/* ========== Projects Tab (list + modal-lite inline form) ========== */
+function formatInput(epochMs: number) {
+  const d = new Date(epochMs);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${dd}`;
+}
 
-function ProjectsTab({ teams, projects, setProjects, milestoneTypes, settings }:
-  { teams: Team[]; projects: Project[]; setProjects: (f: (prev: Project[]) => Project[]) => void; milestoneTypes: MilestoneType[]; settings: SettingsState }) {
-  const [editing, setEditing] = React.useState<Project | null>(null)
+/** ========== PROJECTS (Editor + Legend Manager only here) ========== */
+
+function ProjectsPage({
+  store,
+  setStore,
+}: {
+  store: Store;
+  setStore: (s: Store) => void;
+}) {
+  const [editing, setEditing] = useState<Project | null>(null);
+
+  function upsertProject(p: Project) {
+    const exists = store.projects.some((x) => x.id === p.id);
+    const next = {
+      ...store,
+      projects: exists
+        ? store.projects.map((x) => (x.id === p.id ? p : x))
+        : [...store.projects, p],
+    };
+    setStore(next);
+    setEditing(null);
+  }
 
   return (
-    <div className="max-w-6xl mx-auto p-4 space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-2xl font-bold">Project Management</h2>
-        <button className="px-4 py-2 bg-pira-accent text-white rounded-xl" onClick={() => setEditing({} as any)}>+ Add Project</button>
-      </div>
+    <div className="space-y-6">
+      {/* Legend Manager */}
+      <div className="bg-white rounded-card shadow-soft p-4">
+        <h3 className="font-semibold text-lg mb-3">Legend: Milestone Types</h3>
 
-      {editing && (
-        <div className="bg-white rounded-xl shadow p-4">
-          <ProjectForm
-            teams={teams} milestoneTypes={milestoneTypes} settings={settings} initial={editing.id ? editing : undefined}
-            onSave={p => { setProjects(prev => {
-                const exists = prev.some(x => x.id === p.id)
-                return exists ? prev.map(x => x.id === p.id ? p : x) : [...prev, p]
-              }); setEditing(null) }}
-          />
-        </div>
-      )}
-
-      <div className="bg-white rounded-xl shadow">
-        <div className="p-4 border-b font-semibold">All Projects</div>
-        <div className="divide-y">
-          {projects.length === 0 && <div className="p-6 text-center text-gray-500">No projects yet. Click “Add Project”.</div>}
-          {projects.map(p => (
-            <div key={p.id} className="p-4 flex items-center justify-between">
-              <div>
-                <div className="font-semibold">{p.name} <span className="text-sm text-gray-500">Priority {p.priority}</span></div>
-                <div className="text-sm text-gray-600">Start: {p.start} • Due: {p.due}</div>
-              </div>
-              <div className="flex gap-3">
-                <button className="text-blue-700" onClick={() => setEditing(p)}>Edit</button>
-                <button className="text-red-600" onClick={() => setProjects(prev => prev.filter(x => x.id !== p.id))}>Delete</button>
-              </div>
+        {store.milestoneTypes.map((mt) => (
+          <div key={mt.id} className="grid grid-cols-12 items-center gap-3 py-2">
+            <div className="col-span-4">
+              <input
+                className="w-full rounded-md border px-2 h-9"
+                value={mt.name}
+                onChange={(e) => {
+                  const next = {
+                    ...store,
+                    milestoneTypes: store.milestoneTypes.map((x) =>
+                      x.id === mt.id ? { ...x, name: e.target.value } : x
+                    ),
+                  };
+                  setStore(next);
+                }}
+              />
             </div>
-          ))}
-        </div>
-      </div>
-
-      <div className="bg-white rounded-xl shadow p-4">
-        <LegendSection />
-      </div>
-    </div>
-  )
-
-  function LegendSection() {
-    return (
-      <div className="space-y-3">
-        <h3 className="text-lg font-semibold">Legend (Global Settings)</h3>
-        <p className="text-sm text-gray-600">Manage milestone types and default project bar color in <strong>Unified View</strong> tab’s Legend section.</p>
-      </div>
-    )
-  }
-}
-
-/* ========== Reports (MVP) ========== */
-
-function ReportsTab({ teams, projects }: { teams: Team[]; projects: Project[] }) {
-  const today = toISO(new Date())
-
-  const overdue = projects.filter(p => p.due < today && p.status !== 'Complete')
-
-  // Conflicts: same member on overlapping active projects
-  type Conflict = { memberId: string; memberName: string; teamName: string; a: string; b: string; overlap: string }
-  const conflicts: Conflict[] = []
-
-  const memberName = (id: string) => {
-    const [teamId, name] = id.split(':')
-    const team = teams.find(t => t.id === teamId)
-    return { name, teamName: team?.name || '' }
-  }
-
-  // Build per member project list
-  const byMember: Record<string, Project[]> = {}
-  projects.forEach(p => {
-    p.assigneeIds.forEach(id => {
-      byMember[id] = byMember[id] || []
-      byMember[id].push(p)
-    })
-  })
-
-  Object.entries(byMember).forEach(([id, list]) => {
-    for (let i = 0; i < list.length; i++) {
-      for (let j = i + 1; j < list.length; j++) {
-        const A = list[i], B = list[j]
-        const aS = fromISO(A.start), aE = fromISO(A.due)
-        const bS = fromISO(B.start), bE = fromISO(B.due)
-        if (aS <= bE && bS <= aE) {
-          const overStart = new Date(Math.max(aS.getTime(), bS.getTime()))
-          const overEnd = new Date(Math.min(aE.getTime(), bE.getTime()))
-          const { name, teamName } = memberName(id)
-          conflicts.push({ memberId: id, memberName: name, teamName, a: A.name, b: B.name, overlap: `${toISO(overStart)} → ${toISO(overEnd)}` })
-        }
-      }
-    }
-  })
-
-  const statusCounts = projects.reduce<Record<string, number>>((acc, p) => (acc[p.status] = (acc[p.status] || 0) + 1, acc), {})
-
-  return (
-    <div className="max-w-6xl mx-auto p-4 space-y-6">
-      <div className="bg-white rounded-xl shadow p-4">
-        <h3 className="text-lg font-semibold mb-2">Overdue Projects</h3>
-        {overdue.length === 0 ? <p className="text-gray-500 text-sm">None 🎉</p> : (
-          <ul className="list-disc pl-6">{overdue.map(p => <li key={p.id}>{p.name} (Due {p.due})</li>)}</ul>
-        )}
-      </div>
-
-      <div className="bg-white rounded-xl shadow p-4">
-        <h3 className="text-lg font-semibold mb-2">Status Dashboard</h3>
-        <div className="flex gap-4">
-          {Object.entries(statusCounts).map(([s, n]) => (
-            <div key={s} className="px-4 py-3 bg-gray-50 rounded border">
-              <div className="text-sm text-gray-600">{s}</div>
-              <div className="text-2xl font-bold">{n}</div>
+            <div className="col-span-2">
+              <select
+                className="w-full rounded-md border px-2 h-9"
+                value={mt.shape}
+                onChange={(e) => {
+                  const next = {
+                    ...store,
+                    milestoneTypes: store.milestoneTypes.map((x) =>
+                      x.id === mt.id ? { ...x, shape: e.target.value as any } : x
+                    ),
+                  };
+                  setStore(next);
+                }}
+              >
+                <option>diamond</option>
+                <option>circle</option>
+                <option>triangle</option>
+                <option>square</option>
+              </select>
             </div>
-          ))}
-        </div>
-      </div>
-
-      <div className="bg-white rounded-xl shadow p-4">
-        <h3 className="text-lg font-semibold mb-2">Resource Conflicts (Overlapping)</h3>
-        {conflicts.length === 0 ? <p className="text-gray-500 text-sm">None</p> : (
-          <table className="w-full text-sm">
-            <thead><tr className="text-left"><th>Member</th><th>Team</th><th>Project A</th><th>Project B</th><th>Overlap</th></tr></thead>
-            <tbody>{conflicts.map((c, i) => <tr key={i}><td>{c.memberName}</td><td>{c.teamName}</td><td>{c.a}</td><td>{c.b}</td><td>{c.overlap}</td></tr>)}</tbody>
-          </table>
-        )}
-      </div>
-    </div>
-  )
-}
-
-/* ========== Root App ========== */
-
-export default function ProjectManagementApp() {
-  const [data, setData] = React.useState<DataShape>(loadData)
-  const [active, setActive] = React.useState<Tab>('unified')
-
-  // autosave
-  React.useEffect(() => { saveData(data) }, [data])
-
-  const setTeams = (f: (prev: Team[]) => Team[]) => setData(prev => ({ ...prev, teams: f(prev.teams) }))
-  const setProjects = (f: (prev: Project[]) => Project[]) => setData(prev => ({ ...prev, projects: f(prev.projects) }))
-  const setMilestoneTypes = (f: (prev: MilestoneType[]) => MilestoneType[]) => setData(prev => ({ ...prev, milestoneTypes: f(prev.milestoneTypes) }))
-  const setSettings = (s: SettingsState) => setData(prev => ({ ...prev, settings: s }))
-
-  // export/import JSON
-  const exportJSON = () => {
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url; a.download = `pira-backup-${Date.now()}.json`; a.click()
-    URL.revokeObjectURL(url)
-  }
-  const importJSON = (file: File) => {
-    const reader = new FileReader()
-    reader.onload = () => {
-      try { setData(JSON.parse(String(reader.result))); } catch { alert('Invalid JSON') }
-    }
-    reader.readAsText(file)
-  }
-
-  return (
-    <div className="min-h-screen font-sans">
-      <Header active={active} setActive={setActive} />
-
-      <div className="max-w-6xl mx-auto px-4 pt-4 pb-20 space-y-4">
-        <div className="flex gap-2 no-print">
-          <button className="px-3 py-1 rounded bg-gray-200" onClick={exportJSON}>Export JSON</button>
-          <label className="px-3 py-1 rounded bg-gray-200 cursor-pointer">
-            Import JSON
-            <input type="file" accept="application/json" className="hidden" onChange={e => {
-              const f = e.target.files?.[0]; if (f) importJSON(f)
-            }} />
-          </label>
-          <button className="px-3 py-1 rounded bg-gray-200" onClick={() => window.print()}>Print / Save PDF</button>
-        </div>
-
-        {active === 'unified' && (
-          <>
-            <LegendManager
-              milestoneTypes={data.milestoneTypes}
-              setMilestoneTypes={setMilestoneTypes}
-              settings={data.settings}
-              setSettings={setSettings}
-            />
-            <UnifiedView
-              teams={data.teams}
-              projects={data.projects}
-              milestoneTypes={data.milestoneTypes}
-              settings={data.settings}
-              setSettings={setSettings}
-            />
-          </>
-        )}
-
-        {active === 'teams' && (
-          <TeamsManager teams={data.teams} setTeams={setTeams} />
-        )}
-
-        {active === 'projects' && (
-          <ProjectsTab
-            teams={data.teams}
-            projects={data.projects}
-            setProjects={setProjects}
-            milestoneTypes={data.milestoneTypes}
-            settings={data.settings}
-          />
-        )}
-
-        {active === 'reports' && (
-          <ReportsTab teams={data.teams} projects={data.projects} />
-        )}
-      </div>
-    </div>
-  )
-}
+            <div className="col-span-2">
+              <select
+                className="w-full rounded-md border px-2 h-9"
+                value={mt.size}
+                onChange={(e) => {
+                  const next = {
+                    ...store,
+                    milestoneTypes: store.milestoneTypes.map((x) =>
+                      x.id === mt.id ? { ...x, size: e.target.value as any } : x
+                    ),
+                  };
+                  setStore(next);
+                }}
+              >
+                <option>small</option>
+                <option>medium</option>
+                <option>large</option>
+              </select>
+            </div>
+            <div className="col-span-3">
+              <input
+                type="color"
+                className="w-full h-9 rounded-md border"
+                value={mt.color}
+                onChange={(e) => {
+                  const next = {
+                    ...store,
+                    milestoneTypes: store.milestoneTypes.map((x) =>
+                      x.id === mt.id ? { ...x, color: e.target.value } : x
+                    ),
+                  };
+                  setStore(next);
+                }}
+              />
+            </div>
