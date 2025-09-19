@@ -35,19 +35,26 @@ const ProjectManagementApp = () => {
     { id: 3, name: 'DevOps', members: ['Alex', 'Emma'] }
   ]);
   const [projects, setProjects] = useState([]);
-  const [showExecutiveMode, setShowExecutiveMode] = useState(false);
   
-  // Timeline view settings
-  const [timelineView, setTimelineView] = useState('weeks'); // days, weeks, months
-  const [timelineStartDate, setTimelineStartDate] = useState(() => {
-    const date = new Date();
-    date.setMonth(date.getMonth() - 1);
-    return date;
-  });
-  const [timelineEndDate, setTimelineEndDate] = useState(() => {
-    const date = new Date();
-    date.setMonth(date.getMonth() + 6);
-    return date;
+  // Timeline view settings - per tab
+  const [timelineSettings, setTimelineSettings] = useState(() => {
+    const defaultStart = new Date();
+    defaultStart.setMonth(defaultStart.getMonth() - 1);
+    const defaultEnd = new Date();
+    defaultEnd.setMonth(defaultEnd.getMonth() + 6);
+    
+    return {
+      unified: { view: 'weeks', startDate: defaultStart, endDate: defaultEnd, executiveMode: false },
+      ...teams.reduce((acc, team) => {
+        acc[team.name.toLowerCase().replace(/\s+/g, '-')] = { 
+          view: 'weeks', 
+          startDate: new Date(defaultStart), 
+          endDate: new Date(defaultEnd),
+          executiveMode: false
+        };
+        return acc;
+      }, {})
+    };
   });
   
   // Project management
@@ -56,6 +63,19 @@ const ProjectManagementApp = () => {
   const [editingTeamName, setEditingTeamName] = useState({});
   const [editingMemberName, setEditingMemberName] = useState({});
   
+  // Update timeline settings for a specific tab
+  const updateTimelineSettings = (tabId, updates) => {
+    setTimelineSettings(prev => ({
+      ...prev,
+      [tabId]: { ...prev[tabId], ...updates }
+    }));
+  };
+
+  // Get current timeline settings for active tab
+  const getCurrentTimelineSettings = () => {
+    return timelineSettings[activeTab] || timelineSettings.unified;
+  };
+
   // Status options
   const statusOptions = [
     { name: 'In Progress', color: '#3B82F6' },
@@ -144,6 +164,23 @@ const ProjectManagementApp = () => {
         members: []
       };
       setTeams(prev => [...prev, newTeam]);
+      
+      // Add timeline settings for new team
+      const tabId = teamName.trim().toLowerCase().replace(/\s+/g, '-');
+      const defaultStart = new Date();
+      defaultStart.setMonth(defaultStart.getMonth() - 1);
+      const defaultEnd = new Date();
+      defaultEnd.setMonth(defaultEnd.getMonth() + 6);
+      
+      setTimelineSettings(prev => ({
+        ...prev,
+        [tabId]: {
+          view: 'weeks',
+          startDate: defaultStart,
+          endDate: defaultEnd,
+          executiveMode: false
+        }
+      }));
     }
   };
 
@@ -182,7 +219,11 @@ const ProjectManagementApp = () => {
       }))
     );
   };
-  const generateTimelineColumns = () => {
+
+  const generateTimelineColumns = (settings = null) => {
+    const currentSettings = settings || getCurrentTimelineSettings();
+    const { view: timelineView, startDate: timelineStartDate, endDate: timelineEndDate } = currentSettings;
+    
     const columns = [];
     const start = new Date(timelineStartDate);
     const end = new Date(timelineEndDate);
@@ -216,6 +257,22 @@ const ProjectManagementApp = () => {
       }
     }
     return columns;
+  };
+
+  const calculateTodayPosition = (columns) => {
+    if (!columns.length) return null;
+    
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const timelineStart = columns[0]?.date || today;
+    const timelineEnd = columns[columns.length - 1]?.date || today;
+    
+    if (today < timelineStart || today > timelineEnd) return null;
+    
+    const totalDuration = timelineEnd.getTime() - timelineStart.getTime();
+    const todayOffset = today.getTime() - timelineStart.getTime();
+    
+    return totalDuration > 0 ? (todayOffset / totalDuration) * 100 : 0;
   };
 
   const calculateProjectPosition = (project, columns) => {
@@ -377,17 +434,6 @@ const ProjectManagementApp = () => {
     <div className="p-6 max-w-6xl mx-auto">
       <div className="flex justify-between items-center mb-6">
         <h2 className="text-2xl font-bold text-gray-800">Team Management</h2>
-        <div className="flex items-center gap-4">
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={showExecutiveMode}
-              onChange={(e) => setShowExecutiveMode(e.target.checked)}
-              className="rounded"
-            />
-            <span className="text-sm font-medium">Executive Mode (Hide Names)</span>
-          </label>
-        </div>
       </div>
 
       {/* Add New Team */}
@@ -487,7 +533,7 @@ const ProjectManagementApp = () => {
                         onClick={() => setEditingMemberName(prev => ({ ...prev, [`${team.id}-${member}`]: true }))}
                         title="Click to edit member name"
                       >
-                        {showExecutiveMode ? 'Member' : member}
+                        {member}
                       </span>
                     )}
                     <button
@@ -939,8 +985,8 @@ const ProjectManagementApp = () => {
                                 key={member}
                                 className="px-2 py-1 bg-blue-100 text-blue-800 text-sm rounded"
                               >
-                                {showExecutiveMode ? 'Member' : member}
-                                {memberData && !showExecutiveMode && (
+                                {member}
+                                {memberData && (
                                   <span className="text-blue-600"> ({memberData.teamName})</span>
                                 )}
                               </span>
@@ -976,13 +1022,195 @@ const ProjectManagementApp = () => {
     </div>
   );
 
-  // Other components
-  const UnifiedView = () => (
-    <div className="p-6 text-center">
-      <h2 className="text-2xl font-bold mb-4">Unified Project View</h2>
-      <p className="text-gray-600">Timeline and project visualization will be built in the next section.</p>
-    </div>
-  );
+  // Unified View Component
+  const UnifiedView = () => {
+    const settings = getCurrentTimelineSettings();
+    const columns = generateTimelineColumns(settings);
+    const todayPosition = calculateTodayPosition(columns);
+
+    return (
+      <div className="p-6">
+        <div className="flex justify-between items-center mb-6">
+          <h2 className="text-2xl font-bold text-gray-800">Unified Project Timeline</h2>
+          
+          {/* Timeline Controls */}
+          <div className="flex items-center gap-4">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={settings.executiveMode}
+                onChange={(e) => updateTimelineSettings('unified', { executiveMode: e.target.checked })}
+                className="rounded"
+              />
+              <span className="text-sm font-medium">Executive Mode</span>
+            </label>
+            
+            <div className="flex items-center gap-2">
+              <label className="text-sm font-medium">View:</label>
+              <select 
+                value={settings.view} 
+                onChange={(e) => updateTimelineSettings('unified', { view: e.target.value })}
+                className="px-3 py-1 border border-gray-300 rounded-md"
+              >
+                <option value="days">Days</option>
+                <option value="weeks">Weeks</option>
+                <option value="months">Months</option>
+              </select>
+            </div>
+            
+            <div className="flex items-center gap-2">
+              <label className="text-sm font-medium">From:</label>
+              <input 
+                type="date" 
+                value={settings.startDate.toISOString().split('T')[0]}
+                onChange={(e) => updateTimelineSettings('unified', { startDate: new Date(e.target.value) })}
+                className="px-2 py-1 border border-gray-300 rounded text-sm"
+              />
+            </div>
+            
+            <div className="flex items-center gap-2">
+              <label className="text-sm font-medium">To:</label>
+              <input 
+                type="date" 
+                value={settings.endDate.toISOString().split('T')[0]}
+                onChange={(e) => updateTimelineSettings('unified', { endDate: new Date(e.target.value) })}
+                className="px-2 py-1 border border-gray-300 rounded text-sm"
+              />
+            </div>
+          </div>
+        </div>
+
+        {projects.length === 0 ? (
+          <div className="bg-white rounded-lg shadow-md p-8 text-center text-gray-500">
+            <p>No projects to display.</p>
+            <button
+              onClick={() => setActiveTab('projects')}
+              className="mt-2 text-blue-500 hover:text-blue-700 font-medium"
+            >
+              Add your first project
+            </button>
+          </div>
+        ) : (
+          <div className="bg-white rounded-lg shadow-md overflow-hidden">
+            {/* Header */}
+            <div className="border-b bg-gray-50 p-4">
+              <div className="flex">
+                <div className="w-64 font-medium">All Projects</div>
+                <div className="flex-1 relative">
+                  <div className="flex border-l">
+                    {columns.map((col, index) => (
+                      <div 
+                        key={index} 
+                        className="border-r border-gray-200 text-center text-xs font-medium py-2"
+                        style={{ minWidth: `${col.width}px` }}
+                      >
+                        {col.label}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Projects */}
+            <div className="divide-y divide-gray-200">
+              {projects.map((project, index) => {
+                const position = calculateProjectPosition(project, columns);
+                const statusColor = statusOptions.find(s => s.name === project.status)?.color || '#6B7280';
+                
+                return (
+                  <div key={project.id} className="flex items-center hover:bg-gray-50">
+                    <div className="w-64 p-4">
+                      <div className="text-sm font-medium">
+                        {settings.executiveMode ? `Project ${index + 1}` : project.name}
+                      </div>
+                      <div className="text-xs text-gray-500 flex items-center gap-2">
+                        {project.priority && <span>P{project.priority}</span>}
+                        <span 
+                          className="px-1 py-0 text-white rounded text-xs"
+                          style={{ backgroundColor: statusColor }}
+                        >
+                          {project.status}
+                        </span>
+                      </div>
+                      {project.assignedMembers.length > 0 && (
+                        <div className="text-xs text-gray-500 mt-1">
+                          {settings.executiveMode 
+                            ? `${project.assignedMembers.length} resource${project.assignedMembers.length !== 1 ? 's' : ''}`
+                            : project.assignedMembers.slice(0, 2).join(', ') + (project.assignedMembers.length > 2 ? '...' : '')
+                          }
+                        </div>
+                      )}
+                    </div>
+                    
+                    <div className="flex-1 relative h-12 border-l">
+                      {/* Grid lines */}
+                      {columns.map((col, colIndex) => (
+                        <div 
+                          key={colIndex}
+                          className="absolute border-r border-gray-200 h-full"
+                          style={{ left: `${(colIndex / columns.length) * 100}%` }}
+                        />
+                      ))}
+                      
+                      {/* Today line */}
+                      {todayPosition !== null && (
+                        <div
+                          className="absolute top-0 bottom-0 w-0.5 bg-red-500 z-20"
+                          style={{ left: `${todayPosition}%` }}
+                          title={`Today: ${new Date().toLocaleDateString()}`}
+                        />
+                      )}
+                      
+                      {/* Project Bar */}
+                      <div
+                        className="absolute top-1/2 transform -translate-y-1/2 h-4 rounded flex items-center justify-between px-1 z-10"
+                        style={{
+                          left: position.left,
+                          width: position.width,
+                          backgroundColor: project.projectColor || '#3B82F6',
+                          minWidth: '16px'
+                        }}
+                        title={`${project.name}: ${new Date(project.startDate).toLocaleDateString()} - ${new Date(project.dueDate).toLocaleDateString()}`}
+                      >
+                        <div className="flex items-center">
+                          {renderShape(project.startDateShape || 'diamond', project.startDateColor || '#10B981', 8)}
+                        </div>
+                        <div className="flex items-center">
+                          {renderShape(project.dueDateShape || 'diamond', project.dueDateColor || '#EF4444', 8)}
+                        </div>
+                      </div>
+
+                      {/* Milestones */}
+                      {(project.milestones || []).map((milestone) => {
+                        const milestoneDate = new Date(milestone.date);
+                        const timelineStart = columns[0]?.date || new Date();
+                        const timelineEnd = columns[columns.length - 1]?.date || new Date();
+                        const totalDuration = timelineEnd.getTime() - timelineStart.getTime();
+                        const milestoneOffset = milestoneDate.getTime() - timelineStart.getTime();
+                        const milestoneLeft = Math.max(0, Math.min(100, (milestoneOffset / totalDuration) * 100));
+
+                        return (
+                          <div
+                            key={milestone.id}
+                            className="absolute top-1/2 transform -translate-y-1/2 -translate-x-1/2 z-20"
+                            style={{ left: `${milestoneLeft}%` }}
+                            title={`${milestone.name} - ${new Date(milestone.date).toLocaleDateString()}`}
+                          >
+                            {renderShape(milestone.shape, milestone.color, 12)}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  };
 
   const TeamView = ({ teamId }) => {
     const team = teams.find(t => t.id === teamId);
@@ -991,22 +1219,61 @@ const ProjectManagementApp = () => {
         team?.members.includes(member)
       )
     );
-    const columns = generateTimelineColumns();
+    
+    const tabId = team?.name.toLowerCase().replace(/\s+/g, '-');
+    const settings = timelineSettings[tabId] || timelineSettings.unified;
+    const columns = generateTimelineColumns(settings);
+    const todayPosition = calculateTodayPosition(columns);
 
     return (
       <div className="p-6">
         <div className="flex justify-between items-center mb-6">
           <h2 className="text-2xl font-bold text-gray-800">{team?.name} Team Timeline</h2>
+          
+          {/* Timeline Controls */}
           <div className="flex items-center gap-4">
-            <select 
-              value={timelineView} 
-              onChange={(e) => setTimelineView(e.target.value)}
-              className="px-3 py-1 border border-gray-300 rounded-md"
-            >
-              <option value="days">Days</option>
-              <option value="weeks">Weeks</option>
-              <option value="months">Months</option>
-            </select>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={settings.executiveMode}
+                onChange={(e) => updateTimelineSettings(tabId, { executiveMode: e.target.checked })}
+                className="rounded"
+              />
+              <span className="text-sm font-medium">Executive Mode</span>
+            </label>
+            
+            <div className="flex items-center gap-2">
+              <label className="text-sm font-medium">View:</label>
+              <select 
+                value={settings.view} 
+                onChange={(e) => updateTimelineSettings(tabId, { view: e.target.value })}
+                className="px-3 py-1 border border-gray-300 rounded-md"
+              >
+                <option value="days">Days</option>
+                <option value="weeks">Weeks</option>
+                <option value="months">Months</option>
+              </select>
+            </div>
+            
+            <div className="flex items-center gap-2">
+              <label className="text-sm font-medium">From:</label>
+              <input 
+                type="date" 
+                value={settings.startDate.toISOString().split('T')[0]}
+                onChange={(e) => updateTimelineSettings(tabId, { startDate: new Date(e.target.value) })}
+                className="px-2 py-1 border border-gray-300 rounded text-sm"
+              />
+            </div>
+            
+            <div className="flex items-center gap-2">
+              <label className="text-sm font-medium">To:</label>
+              <input 
+                type="date" 
+                value={settings.endDate.toISOString().split('T')[0]}
+                onChange={(e) => updateTimelineSettings(tabId, { endDate: new Date(e.target.value) })}
+                className="px-2 py-1 border border-gray-300 rounded text-sm"
+              />
+            </div>
           </div>
         </div>
 
@@ -1032,7 +1299,7 @@ const ProjectManagementApp = () => {
           </div>
 
           <div className="divide-y divide-gray-200">
-            {team?.members.map(member => {
+            {team?.members.map((member, memberIndex) => {
               const memberProjects = teamProjects.filter(project => 
                 project.assignedMembers.includes(member)
               );
@@ -1043,7 +1310,7 @@ const ProjectManagementApp = () => {
                   <div className="bg-blue-50 border-b border-blue-100">
                     <div className="flex">
                       <div className="w-64 p-3 font-medium text-blue-800">
-                        {showExecutiveMode ? 'Team Member' : member}
+                        {settings.executiveMode ? `Resource ${memberIndex + 1}` : member}
                         <span className="text-xs text-blue-600 block">
                           {memberProjects.length} project{memberProjects.length !== 1 ? 's' : ''}
                         </span>
@@ -1061,17 +1328,20 @@ const ProjectManagementApp = () => {
                       </div>
                     </div>
                   ) : (
-                    memberProjects.map(project => {
+                    memberProjects.map((project, projectIndex) => {
                       const position = calculateProjectPosition(project, columns);
                       return (
                         <div key={project.id} className="flex items-center hover:bg-gray-50">
                           <div className="w-64 p-4 pl-8">
                             <div className="text-sm font-medium">
-                              {showExecutiveMode ? 'Project' : project.name}
+                              {settings.executiveMode ? `Project ${projectIndex + 1}` : project.name}
                             </div>
                             {project.priority && (
                               <div className="text-xs text-gray-500">Priority: {project.priority}</div>
                             )}
+                            <div className="text-xs text-gray-500">
+                              {new Date(project.startDate).toLocaleDateString()} - {new Date(project.dueDate).toLocaleDateString()}
+                            </div>
                           </div>
                           
                           <div className="flex-1 relative h-12 border-l">
@@ -1084,15 +1354,25 @@ const ProjectManagementApp = () => {
                               />
                             ))}
                             
+                            {/* Today line */}
+                            {todayPosition !== null && (
+                              <div
+                                className="absolute top-0 bottom-0 w-0.5 bg-red-500 z-20"
+                                style={{ left: `${todayPosition}%` }}
+                                title={`Today: ${new Date().toLocaleDateString()}`}
+                              />
+                            )}
+                            
                             {/* Project Bar */}
                             <div
-                              className="absolute top-1/2 transform -translate-y-1/2 h-4 rounded flex items-center justify-between px-1"
+                              className="absolute top-1/2 transform -translate-y-1/2 h-4 rounded flex items-center justify-between px-1 z-10"
                               style={{
                                 left: position.left,
                                 width: position.width,
                                 backgroundColor: project.projectColor || '#3B82F6',
                                 minWidth: '16px'
                               }}
+                              title={`${project.name}: ${new Date(project.startDate).toLocaleDateString()} - ${new Date(project.dueDate).toLocaleDateString()}`}
                             >
                               <div className="flex items-center">
                                 {renderShape(project.startDateShape || 'diamond', project.startDateColor || '#10B981', 8)}
@@ -1107,14 +1387,14 @@ const ProjectManagementApp = () => {
                               const milestoneDate = new Date(milestone.date);
                               const timelineStart = columns[0]?.date || new Date();
                               const timelineEnd = columns[columns.length - 1]?.date || new Date();
-                              const totalDuration = timelineEnd - timelineStart;
-                              const milestoneOffset = milestoneDate - timelineStart;
+                              const totalDuration = timelineEnd.getTime() - timelineStart.getTime();
+                              const milestoneOffset = milestoneDate.getTime() - timelineStart.getTime();
                               const milestoneLeft = Math.max(0, Math.min(100, (milestoneOffset / totalDuration) * 100));
 
                               return (
                                 <div
                                   key={milestone.id}
-                                  className="absolute top-1/2 transform -translate-y-1/2 -translate-x-1/2"
+                                  className="absolute top-1/2 transform -translate-y-1/2 -translate-x-1/2 z-20"
                                   style={{ left: `${milestoneLeft}%` }}
                                   title={`${milestone.name} - ${new Date(milestone.date).toLocaleDateString()}`}
                                 >
