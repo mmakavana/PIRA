@@ -2,77 +2,33 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Global tweaks */
+/* Brand header colors */
 :root {
-  --px-per-day: 16; /* fixed width per day used by the timeline */
+  --pira-primary: #261f62; /* dark blue-purple banner */
+  --pira-secondary: #2f2972; /* slightly lighter strip */
+  --pira-accent: #4f46e5; /* indigo for buttons */
 }
 
-html, body, #root {
-  height: 100%;
-}
+html, body, #root { height: 100%; }
 
-body {
-  @apply font-ui text-slate-800 bg-pira-bg;
-}
-
-/* Header */
 .pira-header {
-  @apply bg-pira-header text-white;
+  background: linear-gradient(180deg, var(--pira-primary) 0%, var(--pira-secondary) 100%);
 }
 
-.pira-band {
-  @apply bg-pira-band text-white;
-}
-
-/* Rounded tabs in nav */
 .pira-tab {
-  @apply inline-flex items-center gap-2 px-4 h-10 rounded-tab transition
-         bg-white/10 hover:bg-white/20;
+  @apply rounded-2xl px-4 py-2 text-sm font-semibold text-white/85;
+  background-color: #2d296a;
 }
+
 .pira-tab.active {
-  @apply bg-white text-pira-header font-semibold shadow-soft;
+  @apply bg-white text-[#1f1b55] shadow;
 }
 
-/* Timeline container */
-.timeline-shell {
-  @apply w-full overflow-x-auto overflow-y-hidden rounded-card bg-white shadow-soft;
-}
+.scrollbar-thin::-webkit-scrollbar { height: 10px; }
+.scrollbar-thin::-webkit-scrollbar-thumb { background: #c7c4f3; border-radius: 8px; }
+.scrollbar-thin::-webkit-scrollbar-track { background: #efeffd; }
 
-/* Sticky column for member names */
-.timeline-sticky {
-  position: sticky;
-  left: 0;
-  z-index: 10;
-  background: linear-gradient(to right, #ffffff 80%, rgba(255,255,255,0));
-}
-
-/* Read-only legend chips */
-.legend-chip {
-  @apply inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slate-100 text-slate-700 text-sm;
-}
-
-/* Utility for thin vertical lines (today & week ticks) */
-.vline {
-  @apply absolute top-0 bottom-0 border-l border-slate-400/70;
-}
-
-/* Weekend shading band */
-.weekend {
-  @apply absolute top-0 bottom-0 bg-slate-200/40;
-}
-
-/* Milestone symbol sizing */
-.m-small { width: 8px; height: 8px; }
-.m-medium { width: 12px; height: 12px; }
-.m-large { width: 16px; height: 16px; }
-
-/* Milestone shapes (SVG fallback with CSS) */
-.shape-diamond { transform: rotate(45deg); }
-.shape-square { }
-.shape-circle { border-radius: 9999px; }
-.shape-triangle {
-  width: 0; height: 0;
-  border-left: 7px solid transparent;
-  border-right: 7px solid transparent;
-  border-bottom: 14px solid currentColor;
+/* timeline grid */
+.tick {
+  @apply border-r border-slate-200;
 }
