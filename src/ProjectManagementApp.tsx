@@ -276,26 +276,38 @@ const ProjectManagementApp = () => {
   };
 
   const calculateProjectPosition = (project, columns) => {
+    if (!columns.length) return { left: '0%', width: '2%' };
+    
     const startDate = new Date(project.startDate);
     const endDate = new Date(project.dueDate);
-    const timelineStart = columns[0]?.date || startDate;
-    const timelineEnd = columns[columns.length - 1]?.date || endDate;
+    const timelineStart = new Date(columns[0].date);
+    const timelineEnd = new Date(columns[columns.length - 1].date);
     
-    // Calculate total timeline width in pixels
-    const totalWidth = columns.reduce((sum, col) => sum + col.width, 0);
+    // Ensure we have valid dates
+    if (!startDate.getTime() || !endDate.getTime()) {
+      return { left: '0%', width: '2%' };
+    }
     
-    // Calculate position based on actual dates
     const totalTimespan = timelineEnd.getTime() - timelineStart.getTime();
-    const projectStart = Math.max(0, startDate.getTime() - timelineStart.getTime());
+    
+    if (totalTimespan <= 0) {
+      return { left: '0%', width: '2%' };
+    }
+    
+    // Calculate position relative to timeline
+    const projectStartOffset = startDate.getTime() - timelineStart.getTime();
     const projectDuration = endDate.getTime() - startDate.getTime();
     
     // Convert to percentages
-    const leftPercent = totalTimespan > 0 ? (projectStart / totalTimespan) * 100 : 0;
-    const widthPercent = totalTimespan > 0 ? (projectDuration / totalTimespan) * 100 : 2;
+    const leftPercent = Math.max(0, (projectStartOffset / totalTimespan) * 100);
+    const widthPercent = Math.max(1, (projectDuration / totalTimespan) * 100);
+    
+    // Ensure the bar doesn't extend beyond the visible timeline
+    const maxWidth = Math.min(widthPercent, 100 - leftPercent);
     
     return { 
-      left: `${Math.max(0, leftPercent)}%`, 
-      width: `${Math.max(2, Math.min(widthPercent, 100 - leftPercent))}%` 
+      left: `${leftPercent}%`, 
+      width: `${Math.max(1, maxWidth)}%`
     };
   };
 
@@ -814,88 +826,126 @@ const ProjectManagementApp = () => {
             </div>
 
             {/* Milestones Section - Full Width */}
-            {editingProject && (
-              <div className="md:col-span-2">
-                <div className="flex justify-between items-center mb-2">
-                  <label className="block text-sm font-medium text-gray-700">
-                    Milestones
-                  </label>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const name = prompt('Milestone name:');
-                      const date = prompt('Milestone date (YYYY-MM-DD):');
-                      if (name && date) {
-                        addMilestone(editingProject.id, {
-                          name,
-                          date,
-                          shape: 'diamond',
-                          color: '#F59E0B'
-                        });
+            <div className="md:col-span-2">
+              <div className="flex justify-between items-center mb-2">
+                <label className="block text-sm font-medium text-gray-700">
+                  Milestones
+                </label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const name = prompt('Milestone name:');
+                    const date = prompt('Milestone date (YYYY-MM-DD):');
+                    if (name && date) {
+                      const newMilestone = {
+                        id: Date.now(),
+                        name,
+                        date,
+                        shape: 'diamond',
+                        color: '#F59E0B'
+                      };
+                      
+                      if (editingProject) {
+                        // Update existing project
+                        const updatedProject = {
+                          ...editingProject,
+                          milestones: [...(editingProject.milestones || []), newMilestone]
+                        };
+                        setEditingProject(updatedProject);
+                        setProjects(projects.map(p => p.id === editingProject.id ? updatedProject : p));
                       }
-                    }}
-                    className="px-3 py-1 bg-blue-500 text-white text-sm rounded hover:bg-blue-600"
-                  >
-                    Add Milestone
-                  </button>
-                </div>
-                
-                <div className="space-y-2 max-h-32 overflow-y-auto">
-                  {(editingProject.milestones || []).map(milestone => (
-                    <div key={milestone.id} className="flex items-center justify-between p-2 bg-gray-50 rounded">
-                      <div className="flex items-center gap-3">
-                        <span className="font-medium">{milestone.name}</span>
-                        <span className="text-sm text-gray-500">{new Date(milestone.date).toLocaleDateString()}</span>
-                        <div className="flex items-center gap-1">
-                          <span className="text-xs">Shape:</span>
-                          <select
-                            value={milestone.shape}
-                            onChange={(e) => {
-                              const updatedMilestones = editingProject.milestones.map(m =>
-                                m.id === milestone.id ? { ...m, shape: e.target.value } : m
-                              );
-                              setProjects(projects.map(p => 
-                                p.id === editingProject.id ? { ...p, milestones: updatedMilestones } : p
-                              ));
-                            }}
-                            className="text-xs px-1 py-0 border rounded"
-                          >
-                            {shapeOptions.map(shape => (
-                              <option key={shape} value={shape}>{shape}</option>
-                            ))}
-                          </select>
-                          <select
-                            value={milestone.color}
-                            onChange={(e) => {
-                              const updatedMilestones = editingProject.milestones.map(m =>
-                                m.id === milestone.id ? { ...m, color: e.target.value } : m
-                              );
-                              setProjects(projects.map(p => 
-                                p.id === editingProject.id ? { ...p, milestones: updatedMilestones } : p
-                              ));
-                            }}
-                            className="text-xs px-1 py-0 border rounded"
-                          >
-                            {colorOptions.map(color => (
-                              <option key={color} value={color} style={{ backgroundColor: color, color: 'white' }}>
-                                {color}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => removeMilestone(editingProject.id, milestone.id)}
-                        className="text-red-500 hover:text-red-700"
-                      >
-                        <X className="w-4 h-4" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
+                    }
+                  }}
+                  className="px-3 py-1 bg-blue-500 text-white text-sm rounded hover:bg-blue-600"
+                >
+                  Add Milestone
+                </button>
               </div>
-            )}
+              
+              <div className="space-y-2 max-h-32 overflow-y-auto">
+                {((editingProject?.milestones) || []).map(milestone => (
+                  <div key={milestone.id} className="flex items-center justify-between p-2 bg-gray-50 rounded">
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="text"
+                        value={milestone.name}
+                        onChange={(e) => {
+                          const updatedMilestones = editingProject.milestones.map(m =>
+                            m.id === milestone.id ? { ...m, name: e.target.value } : m
+                          );
+                          const updatedProject = { ...editingProject, milestones: updatedMilestones };
+                          setEditingProject(updatedProject);
+                          setProjects(projects.map(p => p.id === editingProject.id ? updatedProject : p));
+                        }}
+                        className="font-medium text-sm px-2 py-1 border rounded"
+                      />
+                      <input
+                        type="date"
+                        value={milestone.date}
+                        onChange={(e) => {
+                          const updatedMilestones = editingProject.milestones.map(m =>
+                            m.id === milestone.id ? { ...m, date: e.target.value } : m
+                          );
+                          const updatedProject = { ...editingProject, milestones: updatedMilestones };
+                          setEditingProject(updatedProject);
+                          setProjects(projects.map(p => p.id === editingProject.id ? updatedProject : p));
+                        }}
+                        className="text-sm px-2 py-1 border rounded"
+                      />
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs">Shape:</span>
+                        <select
+                          value={milestone.shape}
+                          onChange={(e) => {
+                            const updatedMilestones = editingProject.milestones.map(m =>
+                              m.id === milestone.id ? { ...m, shape: e.target.value } : m
+                            );
+                            const updatedProject = { ...editingProject, milestones: updatedMilestones };
+                            setEditingProject(updatedProject);
+                            setProjects(projects.map(p => p.id === editingProject.id ? updatedProject : p));
+                          }}
+                          className="text-xs px-1 py-0 border rounded"
+                        >
+                          {shapeOptions.map(shape => (
+                            <option key={shape} value={shape}>{shape}</option>
+                          ))}
+                        </select>
+                        <select
+                          value={milestone.color}
+                          onChange={(e) => {
+                            const updatedMilestones = editingProject.milestones.map(m =>
+                              m.id === milestone.id ? { ...m, color: e.target.value } : m
+                            );
+                            const updatedProject = { ...editingProject, milestones: updatedMilestones };
+                            setEditingProject(updatedProject);
+                            setProjects(projects.map(p => p.id === editingProject.id ? updatedProject : p));
+                          }}
+                          className="text-xs px-1 py-0 border rounded"
+                        >
+                          {colorOptions.map(color => (
+                            <option key={color} value={color} style={{ backgroundColor: color, color: 'white' }}>
+                              {color}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const updatedMilestones = editingProject.milestones.filter(m => m.id !== milestone.id);
+                        const updatedProject = { ...editingProject, milestones: updatedMilestones };
+                        setEditingProject(updatedProject);
+                        setProjects(projects.map(p => p.id === editingProject.id ? updatedProject : p));
+                      }}
+                      className="text-red-500 hover:text-red-700"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
           </form>
 
           {/* Form Actions */}
@@ -1022,6 +1072,128 @@ const ProjectManagementApp = () => {
     </div>
   );
 
+  // Legend Component
+  const LegendEditor = ({ tabId = 'unified' }) => {
+    const [milestoneTypes, setMilestoneTypes] = useState([
+      { id: 'start', name: 'Start Date', color: '#10B981', shape: 'diamond', size: 'small' },
+      { id: 'due', name: 'Due Date', color: '#EF4444', shape: 'diamond', size: 'small' },
+      { id: 'stabilization', name: 'Stabilization', color: '#3B82F6', shape: 'diamond', size: 'medium' },
+      { id: 'complete', name: 'Complete', color: '#10B981', shape: 'diamond', size: 'medium' }
+    ]);
+
+    const addMilestoneType = () => {
+      const newType = {
+        id: Date.now(),
+        name: 'New Milestone',
+        color: '#F59E0B',
+        shape: 'diamond',
+        size: 'small'
+      };
+      setMilestoneTypes(prev => [...prev, newType]);
+    };
+
+    const updateMilestoneType = (id, updates) => {
+      setMilestoneTypes(prev => prev.map(type => 
+        type.id === id ? { ...type, ...updates } : type
+      ));
+    };
+
+    const deleteMilestoneType = (id) => {
+      setMilestoneTypes(prev => prev.filter(type => type.id !== id));
+    };
+
+    return (
+      <div className="bg-white rounded-lg shadow-md p-4 mb-6">
+        <h3 className="text-lg font-semibold mb-4">Legend: Milestone Types</h3>
+        
+        {/* Today Line Control */}
+        <div className="flex items-center gap-4 mb-4 p-3 bg-gray-50 rounded">
+          <label className="flex items-center gap-2">
+            <span className="text-sm font-medium">Today:</span>
+            <input 
+              type="date" 
+              defaultValue={new Date().toISOString().split('T')[0]}
+              className="px-2 py-1 border border-gray-300 rounded text-sm"
+            />
+            <button className="px-3 py-1 bg-blue-500 text-white text-sm rounded hover:bg-blue-600">
+              Apply
+            </button>
+          </label>
+          <span className="text-sm text-gray-500">Controls the vertical black "today" line on the chart.</span>
+        </div>
+
+        {/* Milestone Types */}
+        <div className="space-y-3">
+          {milestoneTypes.map(type => (
+            <div key={type.id} className="flex items-center gap-4 p-2 border rounded">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium w-20">Name</span>
+                <input
+                  type="text"
+                  value={type.name}
+                  onChange={(e) => updateMilestoneType(type.id, { name: e.target.value })}
+                  className="px-2 py-1 border border-gray-300 rounded text-sm w-32"
+                />
+              </div>
+              
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium">Color</span>
+                <div 
+                  className="w-6 h-4 border rounded cursor-pointer"
+                  style={{ backgroundColor: type.color }}
+                  onClick={() => {
+                    const newColor = prompt('Enter hex color:', type.color);
+                    if (newColor) updateMilestoneType(type.id, { color: newColor });
+                  }}
+                />
+              </div>
+              
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium">Shape</span>
+                <select
+                  value={type.shape}
+                  onChange={(e) => updateMilestoneType(type.id, { shape: e.target.value })}
+                  className="px-2 py-1 border border-gray-300 rounded text-sm"
+                >
+                  {shapeOptions.map(shape => (
+                    <option key={shape} value={shape}>{shape}</option>
+                  ))}
+                </select>
+              </div>
+              
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium">Size</span>
+                <select
+                  value={type.size}
+                  onChange={(e) => updateMilestoneType(type.id, { size: e.target.value })}
+                  className="px-2 py-1 border border-gray-300 rounded text-sm"
+                >
+                  <option value="small">small</option>
+                  <option value="medium">medium</option>
+                  <option value="large">large</option>
+                </select>
+              </div>
+              
+              <button
+                onClick={() => deleteMilestoneType(type.id)}
+                className="px-3 py-1 bg-red-500 text-white text-sm rounded hover:bg-red-600"
+              >
+                Delete
+              </button>
+            </div>
+          ))}
+        </div>
+        
+        <button
+          onClick={addMilestoneType}
+          className="mt-3 px-4 py-2 bg-blue-500 text-white text-sm rounded hover:bg-blue-600"
+        >
+          + Add Type
+        </button>
+      </div>
+    );
+  };
+
   // Unified View Component
   const UnifiedView = () => {
     const settings = getCurrentTimelineSettings();
@@ -1079,6 +1251,9 @@ const ProjectManagementApp = () => {
             </div>
           </div>
         </div>
+
+        {/* Legend Editor */}
+        <LegendEditor tabId="unified" />
 
         {projects.length === 0 ? (
           <div className="bg-white rounded-lg shadow-md p-8 text-center text-gray-500">
@@ -1276,6 +1451,9 @@ const ProjectManagementApp = () => {
             </div>
           </div>
         </div>
+
+        {/* Legend Editor */}
+        <LegendEditor tabId={tabId} />
 
         <div className="bg-white rounded-lg shadow-md overflow-hidden">
           {/* Team Members & Their Projects */}
