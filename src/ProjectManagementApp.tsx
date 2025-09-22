@@ -755,7 +755,7 @@ const ProjectManagementApp = () => {
                         </select>
                         <input
                           type="date"
-                          value={milestone.date}
+                          value={milestone.date || ''}
                           onChange={(e) => {
                             const updatedMilestones = editingProject.milestones.map(m =>
                               m.id === milestone.id ? { ...m, date: e.target.value } : m
