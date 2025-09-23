@@ -1,1374 +1,611 @@
-import React, { useState, useRef } from 'react';
-import { Users, Plus, X, Settings, BarChart3, Calendar, Trash2 } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react'
 
-// Simple input that manages its own state completely
-const SimpleInput = React.memo(({ initialValue, onSubmit, placeholder, className, type = "text" }) => {
-  const inputRef = useRef(null);
-  
-  const handleKeyDown = (e) => {
-    if (e.key === 'Enter' && onSubmit) {
-      onSubmit(e.target.value);
-      if (inputRef.current) {
-        inputRef.current.value = '';
-      }
+type Granularity = 'weeks' | 'months' | 'quarters' | 'years'
+type MilestoneType = 'start' | 'due' | 'stabilization' | 'complete'
+
+type Member = { id: string; name: string; teamId: string }
+type Team = { id: string; name: string; members: Member[] }
+
+type Project = {
+  id: string
+  name: string
+  priority: number
+  teamMemberIds: string[]
+  // Comma-separated strings per requirement
+  startDates: string
+  dueDates: string
+  stabilizationDates: string
+  completeDates: string
+}
+
+type Shape = 'circle' | 'diamond' | 'square' | 'triangle'
+type LegendSettings = {
+  barColor: string
+  milestone: Record<MilestoneType, { color: string; shape: Shape; size: number }>
+}
+
+type ViewState = {
+  startDate: string
+  endDate: string
+  autoRange: boolean
+  granularity: Granularity
+  executiveMode: boolean
+  useSystemToday: boolean
+  manualToday: string
+}
+type ViewsMap = Record<string, ViewState>
+
+const uid = () => Math.random().toString(36).slice(2, 10)
+const clamp = (n: number, min = 0, max = 100) => Math.min(max, Math.max(min, n))
+const fmt = (d: Date) => d.toISOString().slice(0, 10)
+const addDays = (d: Date, days: number) => { const x = new Date(d); x.setDate(x.getDate() + days); return x }
+
+const parseDate = (s: string): Date | null => {
+  const t = s.trim()
+  if (!t) return null
+  const d = new Date(t)
+  if (isNaN(d.getTime())) return null
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate())
+}
+const parseCommaDates = (value: string): Date[] =>
+  value.split(',').map(parseDate).filter((d): d is Date => !!d)
+       .sort((a, b) => a.getTime() - b.getTime())
+
+function* tickGenerator(start: Date, end: Date, g: Granularity): Generator<Date, void, unknown> {
+  const startOfMonth = (d: Date) => new Date(d.getFullYear(), d.getMonth(), 1)
+  const startOfQuarter = (d: Date) => new Date(d.getFullYear(), Math.floor(d.getMonth() / 3) * 3, 1)
+  const startOfYear = (d: Date) => new Date(d.getFullYear(), 0, 1)
+
+  let cur = new Date(start)
+  if (g === 'months') cur = startOfMonth(cur)
+  if (g === 'quarters') cur = startOfQuarter(cur)
+  if (g === 'years') cur = startOfYear(cur)
+
+  while (cur <= end) {
+    yield new Date(cur)
+    if (g === 'weeks') cur = addDays(cur, 7)
+    else if (g === 'months') cur = new Date(cur.getFullYear(), cur.getMonth() + 1, 1)
+    else if (g === 'quarters') cur = new Date(cur.getFullYear(), cur.getMonth() + 3, 1)
+    else cur = new Date(cur.getFullYear() + 1, 0, 1)
+  }
+}
+
+const ALL_TYPES: MilestoneType[] = ['start', 'due', 'stabilization', 'complete']
+const defaultLegend: LegendSettings = {
+  barColor: '#0ea5e9',
+  milestone: {
+    start: { color: '#10b981', shape: 'circle', size: 10 },
+    due: { color: '#ef4444', shape: 'diamond', size: 10 },
+    stabilization: { color: '#f59e0b', shape: 'square', size: 10 },
+    complete: { color: '#6366f1', shape: 'triangle', size: 12 },
+  },
+}
+const todayISO = () => new Date().toISOString().slice(0, 10)
+const defaultView = (): ViewState => ({
+  startDate: fmt(addDays(new Date(), -30)),
+  endDate: fmt(addDays(new Date(), 90)),
+  autoRange: true,
+  granularity: 'months',
+  executiveMode: false,
+  useSystemToday: true,
+  manualToday: todayISO(),
+})
+
+function load<T>(key: string, fallback: T): T {
+  try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) as T : fallback }
+  catch { return fallback }
+}
+function save<T>(key: string, value: T) { try { localStorage.setItem(key, JSON.stringify(value)) } catch {} }
+
+const getProjectAllDates = (p: Project): Date[] => [
+  ...parseCommaDates(p.startDates),
+  ...parseCommaDates(p.dueDates),
+  ...parseCommaDates(p.stabilizationDates),
+  ...parseCommaDates(p.completeDates),
+].sort((a, b) => a.getTime() - b.getTime())
+
+const getProjectSpan = (p: Project) => {
+  const all = getProjectAllDates(p)
+  return all.length ? { start: all[0], end: all[all.length - 1] } : { start: null, end: null }
+}
+
+export default function ProjectManagementApp() {
+  const [teams, setTeams] = useState<Team[]>(() =>
+    load<Team[]>('pm_teams', [
+      { id: uid(), name: 'AppDev', members: [{ id: uid(), name: 'Ava', teamId: 'TBD' }] },
+      { id: uid(), name: 'Infra', members: [{ id: uid(), name: 'Noah', teamId: 'TBD' }] },
+    ].map(t => ({...t, members: t.members.map(m => ({...m, teamId: t.id}))})))
+  )
+  const [projects, setProjects] = useState<Project[]>(() =>
+    load<Project[]>('pm_projects', [{
+      id: uid(), name: 'Unified Auth', priority: 1, teamMemberIds: [],
+      startDates: '2025-01-10', dueDates: '2025-02-15',
+      stabilizationDates: '2025-03-01', completeDates: ''
+    }])
+  )
+  const [legend, setLegend] = useState<LegendSettings>(() => load('pm_legend', defaultLegend))
+  const [views, setViews] = useState<ViewsMap>(() => load('pm_views', {}))
+  const [activeTab, setActiveTab] = useState<string>('Unified')
+  const [showLegend, setShowLegend] = useState(false)
+
+  const ensureView = (key: string) => {
+    if (!views[key]) setViews(v => ({ ...v, [key]: defaultView() }))
+  }
+  useEffect(() => { ensureView('Unified') }, [])
+  useEffect(() => { save('pm_teams', teams) }, [teams])
+  useEffect(() => { save('pm_projects', projects) }, [projects])
+  useEffect(() => { save('pm_legend', legend) }, [legend])
+  useEffect(() => { save('pm_views', views) }, [views])
+  useEffect(() => { ensureView(activeTab) }, [activeTab])
+
+  const tabs = useMemo(() => ['Unified', ...teams.map(t => t.id), 'Teams', 'Projects'], [teams])
+
+  // Auto-range per tab (keeps visual window in sync with table data)
+  useEffect(() => {
+    const v = views[activeTab]
+    if (!v?.autoRange) return
+    let relevant = projects
+    if (activeTab !== 'Unified' && activeTab !== 'Teams' && activeTab !== 'Projects') {
+      const teamId = activeTab
+      const memberIds = teams.find(t => t.id === teamId)?.members.map(m => m.id) ?? []
+      relevant = projects.filter(p => p.teamMemberIds.some(id => memberIds.includes(id)))
     }
-  };
+    const all = relevant.flatMap(getProjectAllDates)
+    if (!all.length) return
+    const start = addDays(all[0], -7)
+    const end = addDays(all[all.length - 1], +7)
+    setViews(vs => ({ ...vs, [activeTab]: { ...vs[activeTab], startDate: fmt(start), endDate: fmt(end) } }))
+  }, [projects, teams, activeTab]) // stays aligned with data
+
+  const view = views[activeTab] ?? defaultView()
+  const renderTabLabel = (key: string) =>
+    key === 'Unified' || key === 'Teams' || key === 'Projects' ? key : `Team – ${teams.find(t => t.id === key)?.name ?? key}`
 
   return (
-    <input
-      ref={inputRef}
-      type={type}
-      defaultValue={initialValue || ''}
-      placeholder={placeholder}
-      className={className}
-      onKeyDown={handleKeyDown}
-    />
-  );
-});
+    <div className="mx-auto max-w-[1200px] p-4">
+      <header className="mb-4 flex items-center justify-between gap-3">
+        <h1 className="text-2xl font-bold">PIRA Project Timeline</h1>
+        <button className="pm-outline" onClick={() => setShowLegend(true)}>Legend</button>
+      </header>
 
-const ProjectManagementApp = () => {
-  // Core state management
-  const [activeTab, setActiveTab] = useState('unified');
-  const [teams, setTeams] = useState([
-    { id: 1, name: 'Development', members: ['John', 'Sarah', 'Mike'] },
-    { id: 2, name: 'QA', members: ['Lisa', 'Tom'] },
-    { id: 3, name: 'DevOps', members: ['Alex', 'Emma'] }
-  ]);
-  const [projects, setProjects] = useState([]);
-  
-  // Legend types - managed globally
-  const [legendTypes, setLegendTypes] = useState([
-    { id: 'start', name: 'Start Date', color: '#10B981', shape: 'diamond', size: 'small' },
-    { id: 'due', name: 'Due Date', color: '#EF4444', shape: 'diamond', size: 'small' },
-    { id: 'stabilization', name: 'Stabilization', color: '#3B82F6', shape: 'diamond', size: 'medium' },
-    { id: 'complete', name: 'Complete', color: '#10B981', shape: 'diamond', size: 'medium' }
-  ]);
-  
-  // Fixed color palette
-  const projectColors = [
-    '#3B82F6', '#EF4444', '#10B981', '#F59E0B', '#8B5CF6', '#EC4899',
-    '#06B6D4', '#84CC16', '#F97316', '#6366F1', '#14B8A6', '#F43F5E',
-    '#A855F7', '#22C55E', '#EAB308', '#64748B'
-  ];
-  
-  // Timeline settings - auto-calculate based on projects
-  const calculateTimelineRange = () => {
-    if (projects.length === 0) {
-      const defaultStart = new Date();
-      defaultStart.setMonth(defaultStart.getMonth() - 1);
-      const defaultEnd = new Date();
-      defaultEnd.setMonth(defaultEnd.getMonth() + 6);
-      return { startDate: defaultStart, endDate: defaultEnd };
-    }
-    
-    const allDates = projects.flatMap(p => [
-      new Date(p.startDate),
-      new Date(p.dueDate),
-      ...(p.milestones || []).map(m => new Date(m.date))
-    ]).filter(d => !isNaN(d));
-    
-    const earliest = new Date(Math.min(...allDates));
-    const latest = new Date(Math.max(...allDates));
-    
-    // Add padding
-    earliest.setDate(earliest.getDate() - 7);
-    latest.setDate(latest.getDate() + 7);
-    
-    return { startDate: earliest, endDate: latest };
-  };
-  
-  // Project management
-  const [showAddProject, setShowAddProject] = useState(false);
-  const [editingProject, setEditingProject] = useState(null);
-  const [editingTeamName, setEditingTeamName] = useState({});
-  const [editingMemberName, setEditingMemberName] = useState({});
-  const [executiveMode, setExecutiveMode] = useState(false);
-  const [selectedProjectColor, setSelectedProjectColor] = useState(projectColors[0]);
-  const [showColorPicker, setShowColorPicker] = useState(false);
-
-  // Generate timeline columns with fixed width
-  const generateTimelineColumns = () => {
-    const range = calculateTimelineRange();
-    const columns = [];
-    const columnWidth = 80; // Fixed width
-    
-    const current = new Date(range.startDate);
-    const end = new Date(range.endDate);
-    
-    // Generate weekly columns
-    while (current <= end) {
-      columns.push({
-        date: new Date(current),
-        label: current.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' }),
-        width: columnWidth
-      });
-      current.setDate(current.getDate() + 7); // Weekly intervals
-    }
-    
-    return columns;
-  };
-
-  // Status options
-  const statusOptions = [
-    { name: 'In Progress', color: '#3B82F6' },
-    { name: 'Stabilization', color: '#F59E0B' },
-    { name: 'On Hold', color: '#EF4444' },
-    { name: 'Complete', color: '#10B981' }
-  ];
-
-  // Shape and color options for milestones
-  const shapeOptions = ['diamond', 'circle', 'triangle', 'square', 'star'];
-
-  const calculateTodayPosition = (columns) => {
-    if (!columns.length) return null;
-    
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const timelineStart = columns[0].date;
-    const timelineEnd = columns[columns.length - 1].date;
-    
-    if (today < timelineStart || today > timelineEnd) return null;
-    
-    const totalDuration = timelineEnd.getTime() - timelineStart.getTime();
-    const todayOffset = today.getTime() - timelineStart.getTime();
-    
-    return totalDuration > 0 ? (todayOffset / totalDuration) * 100 : 0;
-  };
-
-  const calculateProjectPosition = (project, columns) => {
-    if (!columns.length) return { left: '0px', width: '20px' };
-    
-    const startDate = new Date(project.startDate);
-    const endDate = new Date(project.dueDate);
-    const timelineStart = columns[0].date;
-    const timelineEnd = columns[columns.length - 1].date;
-    
-    const totalDuration = timelineEnd.getTime() - timelineStart.getTime();
-    const totalWidth = columns.length * columns[0].width;
-    
-    const projectStartOffset = startDate.getTime() - timelineStart.getTime();
-    const projectDuration = endDate.getTime() - startDate.getTime();
-    
-    const leftPixels = (projectStartOffset / totalDuration) * totalWidth;
-    const widthPixels = Math.max(20, (projectDuration / totalDuration) * totalWidth);
-    
-    return { 
-      left: `${Math.max(0, leftPixels)}px`, 
-      width: `${widthPixels}px`
-    };
-  };
-
-  // Update team name
-  const updateTeamName = (teamId, newName) => {
-    if (newName.trim()) {
-      setTeams(teams.map(team => 
-        team.id === teamId 
-          ? { ...team, name: newName.trim() }
-          : team
-      ));
-      setEditingTeamName(prev => ({ ...prev, [teamId]: false }));
-    }
-  };
-
-  // Update member name
-  const updateMemberName = (teamId, oldName, newName) => {
-    if (newName.trim()) {
-      setTeams(teams.map(team => 
-        team.id === teamId 
-          ? { 
-              ...team, 
-              members: team.members.map(member => 
-                member === oldName ? newName.trim() : member
-              ) 
-            }
-          : team
-      ));
-      setEditingMemberName(prev => ({ ...prev, [`${teamId}-${oldName}`]: false }));
-    }
-  };
-
-  // Generate team tabs dynamically
-  const teamTabs = teams.map(team => ({
-    id: team.name.toLowerCase().replace(/\s+/g, '-'),
-    label: team.name,
-    teamId: team.id
-  }));
-
-  // Add new team
-  const addTeam = (teamName) => {
-    if (teamName && teamName.trim()) {
-      const newTeam = {
-        id: Date.now(),
-        name: teamName.trim(),
-        members: []
-      };
-      setTeams(prev => [...prev, newTeam]);
-    }
-  };
-
-  // Delete team
-  const deleteTeam = (teamId) => {
-    setTeams(teams.filter(team => team.id !== teamId));
-  };
-
-  // Add member to team
-  const addMemberToTeam = (teamId, memberName) => {
-    if (memberName && memberName.trim()) {
-      setTeams(teams.map(team => 
-        team.id === teamId 
-          ? { ...team, members: [...team.members, memberName.trim()] }
-          : team
-      ));
-    }
-  };
-
-  // Remove member from team
-  const removeMemberFromTeam = (teamId, memberName) => {
-    setTeams(teams.map(team => 
-      team.id === teamId 
-        ? { ...team, members: team.members.filter(member => member !== memberName) }
-        : team
-    ));
-  };
-
-  // Get all members across all teams
-  const getAllMembers = () => {
-    return teams.flatMap(team => 
-      team.members.map(member => ({
-        name: member,
-        teamId: team.id,
-        teamName: team.name
-      }))
-    );
-  };
-
-  const renderShape = (shape, color, size = 12) => {
-    const shapeProps = {
-      width: size,
-      height: size,
-      fill: color,
-      stroke: '#000',
-      strokeWidth: 1
-    };
-
-    switch (shape) {
-      case 'diamond':
-        return (
-          <svg width={size} height={size} className="inline-block">
-            <polygon points={`${size/2},2 ${size-2},${size/2} ${size/2},${size-2} 2,${size/2}`} {...shapeProps} />
-          </svg>
-        );
-      case 'circle':
-        return (
-          <svg width={size} height={size} className="inline-block">
-            <circle cx={size/2} cy={size/2} r={size/2-1} {...shapeProps} />
-          </svg>
-        );
-      case 'triangle':
-        return (
-          <svg width={size} height={size} className="inline-block">
-            <polygon points={`${size/2},2 ${size-2},${size-2} 2,${size-2}`} {...shapeProps} />
-          </svg>
-        );
-      case 'square':
-        return (
-          <svg width={size} height={size} className="inline-block">
-            <rect x="2" y="2" width={size-4} height={size-4} {...shapeProps} />
-          </svg>
-        );
-      case 'star':
-        return (
-          <svg width={size} height={size} className="inline-block">
-            <polygon points={`${size/2},2 ${size*0.6},${size*0.4} ${size-2},${size*0.4} ${size*0.7},${size*0.65} ${size*0.8},${size-2} ${size/2},${size*0.75} ${size*0.2},${size-2} ${size*0.3},${size*0.65} 2,${size*0.4} ${size*0.4},${size*0.4}`} {...shapeProps} />
-          </svg>
-        );
-      default:
-        return <div style={{width: size, height: size, backgroundColor: color, borderRadius: '50%'}} className="inline-block" />;
-    }
-  };
-
-  // Simple Legend Display (for Unified/Team tabs)
-  const LegendDisplay = () => (
-    <div className="bg-white rounded-lg shadow-sm border p-3 mb-4">
-      <div className="flex items-center gap-4">
-        <span className="font-medium text-sm">Legend:</span>
-        {legendTypes.map(type => (
-          <div key={type.id} className="flex items-center gap-2">
-            {renderShape(type.shape, type.color, type.size === 'small' ? 8 : type.size === 'medium' ? 12 : 16)}
-            <span className="text-sm">{type.name}</span>
-          </div>
+      <nav className="mb-3 flex flex-wrap gap-2">
+        {tabs.map(key => (
+          <button key={key} onClick={() => setActiveTab(key)}
+            className={"pm-outline " + (activeTab === key ? "border-slate-900" : "")}
+            title={renderTabLabel(key)}>
+            {renderTabLabel(key)}
+          </button>
         ))}
+      </nav>
+
+      <PanelControls
+        view={view}
+        onChange={next => setViews(v => ({ ...v, [activeTab]: { ...v[activeTab], ...next } }))}
+      />
+
+      <div className="mt-4">
+        {activeTab === 'Projects' && (
+          <ProjectsManager teams={teams} projects={projects} setProjects={setProjects} legend={legend} />
+        )}
+        {activeTab === 'Teams' && (
+          <TeamsManager teams={teams} setTeams={setTeams} executive={view.executiveMode} />
+        )}
+        {(activeTab === 'Unified' || (activeTab !== 'Teams' && activeTab !== 'Projects')) && (
+          <TimelineView
+            key={'tl-' + activeTab}
+            tabKey={activeTab}
+            teams={teams}
+            projects={projects}
+            legend={legend}
+            view={view}
+            setView={partial => setViews(v => ({ ...v, [activeTab]: { ...v[activeTab], ...partial } }))}
+            executive={view.executiveMode}
+            openLegend={() => setShowLegend(true)}
+          />
+        )}
+      </div>
+
+      {showLegend && <LegendModal legend={legend} setLegend={setLegend} onClose={() => setShowLegend(false)} />}
+    </div>
+  )
+}
+
+function PanelControls({ view, onChange }: { view: ViewState, onChange: (partial: Partial<ViewState>) => void }) {
+  return (
+    <div className="rounded-xl border bg-white p-3 shadow-sm">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className="flex items-center gap-2">
+          <label className="badge">Granularity</label>
+          <select value={view.granularity} onChange={e => onChange({ granularity: e.target.value as Granularity })}>
+            <option value="weeks">Weeks</option>
+            <option value="months">Months</option>
+            <option value="quarters">Quarters</option>
+            <option value="years">Years</option>
+          </select>
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="badge">Auto Range</label>
+          <input type="checkbox" checked={view.autoRange} onChange={e => onChange({ autoRange: e.target.checked })} />
+          <span className="text-sm text-slate-500">Start/End follow project dates</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="badge">Executive Mode</label>
+          <input type="checkbox" checked={view.executiveMode} onChange={e => onChange({ executiveMode: e.target.checked })} />
+          <span className="text-sm text-slate-500">Hide names</span>
+        </div>
+      </div>
+
+      <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className="flex items-center gap-2">
+          <label className="badge">Start</label>
+          <input type="date" value={view.startDate} onChange={e => onChange({ startDate: e.target.value, autoRange: false })} />
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="badge">End</label>
+          <input type="date" value={view.endDate} onChange={e => onChange({ endDate: e.target.value, autoRange: false })} />
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="badge">Today</label>
+          <input type="checkbox" checked={view.useSystemToday} onChange={e => onChange({ useSystemToday: e.target.checked })} />
+          <span className="text-sm">Use system date</span>
+          {!view.useSystemToday && (
+            <input type="date" className="ml-2" value={view.manualToday} onChange={e => onChange({ manualToday: e.target.value })} />
+          )}
+        </div>
       </div>
     </div>
-  );
+  )
+}
 
-  // Legend Editor (only for Projects tab)
-  const LegendEditor = () => {
-    const addMilestoneType = () => {
-      const newType = {
-        id: Date.now(),
-        name: 'New Milestone',
-        color: '#F59E0B',
-        shape: 'diamond',
-        size: 'small'
-      };
-      setLegendTypes(prev => [...prev, newType]);
-    };
+function LegendModal({ legend, setLegend, onClose }:
+  { legend: LegendSettings, setLegend: (l: LegendSettings) => void, onClose: () => void }) {
+  const update = (k: MilestoneType, field: 'color' | 'shape' | 'size', value: string) => {
+    setLegend({
+      ...legend,
+      milestone: {
+        ...legend.milestone,
+        [k]: { ...legend.milestone[k], [field]: field === 'size' ? Math.max(6, Math.min(24, parseInt(value || '10', 10))) : value }
+      }
+    })
+  }
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/30 p-4">
+      <div className="w-full max-w-2xl rounded-xl border bg-white p-4 shadow-lg">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-xl font-semibold">Legend Settings</h2>
+          <button className="pm-outline" onClick={onClose}>Close</button>
+        </div>
 
-    const updateLegendType = (id, updates) => {
-      setLegendTypes(prev => prev.map(type => 
-        type.id === id ? { ...type, ...updates } : type
-      ));
-    };
+        <div className="mb-4">
+          <label className="block text-sm font-medium mb-1">Project Bar Color</label>
+          <input type="color" value={legend.barColor} onChange={e => setLegend({ ...legend, barColor: e.target.value })} className="h-10 w-16" />
+        </div>
 
-    const deleteLegendType = (id) => {
-      setLegendTypes(prev => prev.filter(type => type.id !== id));
-    };
-
-    return (
-      <div className="bg-white rounded-lg shadow-md p-4 mb-6">
-        <h3 className="text-lg font-semibold mb-4">Legend Editor: Milestone Types</h3>
-        
-        <div className="space-y-3">
-          {legendTypes.map(type => (
-            <div key={type.id} className="flex items-center gap-4 p-2 border rounded">
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-medium w-16">Name</span>
-                <input
-                  type="text"
-                  value={type.name}
-                  onChange={(e) => updateLegendType(type.id, { name: e.target.value })}
-                  className="px-2 py-1 border border-gray-300 rounded text-sm w-32"
-                />
-              </div>
-              
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-medium">Color</span>
-                <div 
-                  className="w-6 h-4 border rounded cursor-pointer"
-                  style={{ backgroundColor: type.color }}
-                  onClick={() => {
-                    const newColor = prompt('Enter hex color:', type.color);
-                    if (newColor) updateLegendType(type.id, { color: newColor });
-                  }}
-                />
-              </div>
-              
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-medium">Shape</span>
-                <select
-                  value={type.shape}
-                  onChange={(e) => updateLegendType(type.id, { shape: e.target.value })}
-                  className="px-2 py-1 border border-gray-300 rounded text-sm"
-                >
-                  {shapeOptions.map(shape => (
-                    <option key={shape} value={shape}>{shape}</option>
-                  ))}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {ALL_TYPES.map((t) => (
+            <div key={t} className="rounded-lg border p-3">
+              <div className="font-medium capitalize mb-2">{t}</div>
+              <div className="flex items-center gap-3">
+                <label className="text-sm">Color</label>
+                <input type="color" value={legend.milestone[t].color} onChange={e => update(t, 'color', e.target.value)} />
+                <label className="text-sm">Shape</label>
+                <select value={legend.milestone[t].shape} onChange={e => update(t, 'shape', e.target.value)}>
+                  <option value="circle">Circle</option>
+                  <option value="diamond">Diamond</option>
+                  <option value="square">Square</option>
+                  <option value="triangle">Triangle</option>
                 </select>
+                <label className="text-sm">Size</label>
+                <input type="number" min={6} max={24} value={legend.milestone[t].size} onChange={e => update(t, 'size', e.target.value)} className="w-20" />
               </div>
-              
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-medium">Size</span>
-                <select
-                  value={type.size}
-                  onChange={(e) => updateLegendType(type.id, { size: e.target.value })}
-                  className="px-2 py-1 border border-gray-300 rounded text-sm"
-                >
-                  <option value="small">small</option>
-                  <option value="medium">medium</option>
-                  <option value="large">large</option>
-                </select>
-              </div>
-              
-              <button
-                onClick={() => deleteLegendType(type.id)}
-                className="px-3 py-1 bg-red-500 text-white text-sm rounded hover:bg-red-600"
-              >
-                Delete
-              </button>
             </div>
           ))}
         </div>
-        
-        <button
-          onClick={addMilestoneType}
-          className="mt-3 px-4 py-2 bg-blue-500 text-white text-sm rounded hover:bg-blue-600"
-        >
-          + Add Type
-        </button>
       </div>
-    );
-  };
+    </div>
+  )
+}
 
-  // Team Management Component
-  const TeamManagement = () => (
-    <div className="p-6 max-w-6xl mx-auto">
-      <div className="flex justify-between items-center mb-6">
-        <h2 className="text-2xl font-bold text-gray-800">Team Management</h2>
+function TeamsManager({ teams, setTeams, executive }:
+  { teams: Team[], setTeams: React.Dispatch<React.SetStateAction<Team[]>>, executive: boolean }) {
+  const addTeam = () => { const name = prompt('Team name?'); if (name) setTeams(ts => [...ts, { id: uid(), name, members: [] }]) }
+  const renameTeam = (id: string) => {
+    const t = teams.find(t => t.id === id); if (!t) return
+    const name = prompt('New team name', t.name); if (name) setTeams(ts => ts.map(x => x.id === id ? { ...x, name } : x))
+  }
+  const addMember = (teamId: string) => {
+    const name = prompt('Member name?'); if (!name) return
+    setTeams(ts => ts.map(t => t.id === teamId ? { ...t, members: [...t.members, { id: uid(), name, teamId }] } : t))
+  }
+  const renameMember = (teamId: string, memberId: string) => {
+    const team = teams.find(t => t.id === teamId); const m = team?.members.find(m => m.id === memberId); if (!m) return
+    const name = prompt('New member name', m.name); if (name)
+      setTeams(ts => ts.map(t => t.id === teamId ? { ...t, members: t.members.map(mm => mm.id === memberId ? { ...mm, name } : mm) } : t))
+  }
+  const removeMember = (teamId: string, memberId: string) =>
+    setTeams(ts => ts.map(t => t.id === teamId ? { ...t, members: t.members.filter(mm => mm.id !== memberId) } : t))
+  const removeTeam = (id: string) => { if (confirm('Delete team (and its members)?')) setTeams(ts => ts.filter(t => t.id !== id)) }
+
+  return (
+    <div className="rounded-xl border bg-white p-4 shadow-sm">
+      <div className="mb-3 flex items-center justify-between">
+        <h2 className="text-lg font-semibold">Teams</h2>
+        <button className="pm" onClick={addTeam}>Add Team</button>
       </div>
-
-      {/* Add New Team */}
-      <div className="bg-white rounded-lg shadow-md p-6 mb-6">
-        <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
-          <Plus className="w-5 h-5" />
-          Add New Team
-        </h3>
-        <div className="flex gap-3">
-          <SimpleInput
-            placeholder="Team name"
-            onSubmit={addTeam}
-            className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-          />
-          <button
-            onClick={() => {
-              const input = document.querySelector('input[placeholder="Team name"]');
-              if (input && input.value.trim()) {
-                addTeam(input.value);
-                input.value = '';
-              }
-            }}
-            className="px-4 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600 transition-colors"
-          >
-            Add Team
-          </button>
-        </div>
-      </div>
-
-      {/* Teams List */}
-      <div className="grid gap-6">
-        {teams.map(team => (
-          <div key={team.id} className="bg-white rounded-lg shadow-md p-6">
-            <div className="flex justify-between items-center mb-4">
-              {editingTeamName[team.id] ? (
-                <input
-                  type="text"
-                  defaultValue={team.name}
-                  onBlur={(e) => updateTeamName(team.id, e.target.value)}
-                  onKeyPress={(e) => {
-                    if (e.key === 'Enter') {
-                      updateTeamName(team.id, e.target.value);
-                    }
-                    if (e.key === 'Escape') {
-                      setEditingTeamName(prev => ({ ...prev, [team.id]: false }));
-                    }
-                  }}
-                  className="text-lg font-semibold text-gray-800 border border-gray-300 rounded px-2 py-1 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  autoFocus
-                />
-              ) : (
-                <h3 
-                  className="text-lg font-semibold text-gray-800 cursor-pointer hover:text-blue-600"
-                  onClick={() => setEditingTeamName(prev => ({ ...prev, [team.id]: true }))}
-                  title="Click to edit team name"
-                >
-                  {team.name}
-                </h3>
-              )}
-              <button
-                onClick={() => deleteTeam(team.id)}
-                className="text-red-500 hover:text-red-700 transition-colors"
-                title="Delete Team"
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>
-            </div>
-
-            {/* Team Members */}
-            <div className="mb-4">
-              <h4 className="font-medium text-gray-700 mb-2">Members:</h4>
-              <div className="flex flex-wrap gap-2">
-                {team.members.map(member => (
-                  <span
-                    key={member}
-                    className="inline-flex items-center gap-1 px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-sm"
-                  >
-                    {editingMemberName[`${team.id}-${member}`] ? (
-                      <input
-                        type="text"
-                        defaultValue={member}
-                        onBlur={(e) => updateMemberName(team.id, member, e.target.value)}
-                        onKeyPress={(e) => {
-                          if (e.key === 'Enter') {
-                            updateMemberName(team.id, member, e.target.value);
-                          }
-                          if (e.key === 'Escape') {
-                            setEditingMemberName(prev => ({ ...prev, [`${team.id}-${member}`]: false }));
-                          }
-                        }}
-                        className="bg-white border border-gray-300 rounded px-1 text-xs focus:outline-none focus:ring-1 focus:ring-blue-500"
-                        autoFocus
-                      />
-                    ) : (
-                      <span 
-                        className="cursor-pointer hover:text-blue-900"
-                        onClick={() => setEditingMemberName(prev => ({ ...prev, [`${team.id}-${member}`]: true }))}
-                        title="Click to edit member name"
-                      >
-                        {member}
-                      </span>
-                    )}
-                    <button
-                      onClick={() => removeMemberFromTeam(team.id, member)}
-                      className="text-blue-600 hover:text-blue-800"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  </span>
-                ))}
-                {team.members.length === 0 && (
-                  <span className="text-gray-500 italic">No members assigned</span>
-                )}
+      <div className="grid gap-4">
+        {teams.map((t) => (
+          <div key={t.id} className="rounded-lg border p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <div className="font-medium">
+                {t.name} <span className="text-xs text-slate-500">(Members: {t.members.length})</span>
+              </div>
+              <div className="flex gap-2">
+                <button className="pm-outline" onClick={() => renameTeam(t.id)}>✏️ Rename</button>
+                <button className="pm-outline" onClick={() => addMember(t.id)}>＋ Add Member</button>
+                <button className="pm-outline" onClick={() => removeTeam(t.id)}>🗑 Delete</button>
               </div>
             </div>
-
-            {/* Add Member */}
-            <div className="flex gap-3">
-              <SimpleInput
-                placeholder="New member name"
-                onSubmit={(value) => addMemberToTeam(team.id, value)}
-                className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-              <button
-                onClick={() => {
-                  const input = event.target.closest('.flex').querySelector('input[placeholder="New member name"]');
-                  if (input && input.value.trim()) {
-                    addMemberToTeam(team.id, input.value.trim());
-                    input.value = '';
-                  }
-                }}
-                className="px-4 py-2 bg-green-500 text-white rounded-md hover:bg-green-600 transition-colors"
-              >
-                Add Member
-              </button>
-            </div>
+            <ul className="space-y-1">
+              {t.members.map((m, i) => (
+                <li key={m.id} className="flex items-center justify-between">
+                  <span>{executive ? `Resource ${i + 1}` : m.name}</span>
+                  <span className="flex gap-2">
+                    <button className="pm-outline" onClick={() => renameMember(t.id, m.id)}>✏️</button>
+                    <button className="pm-outline" onClick={() => removeMember(t.id, m.id)}>🗑</button>
+                  </span>
+                </li>
+              ))}
+            </ul>
           </div>
         ))}
       </div>
     </div>
-  );
+  )
+}
 
-  // Project Management Component
-  const ProjectManagement = () => (
-    <div className="p-6 max-w-6xl mx-auto">
-      <div className="flex justify-between items-center mb-6">
-        <h2 className="text-2xl font-bold text-gray-800">Project Management</h2>
-        <button
-          onClick={() => setShowAddProject(true)}
-          className="px-4 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600 transition-colors flex items-center gap-2"
-        >
-          <Plus className="w-4 h-4" />
-          Add Project
-        </button>
-      </div>
-
-      {/* Legend Editor - Only in Projects tab */}
-      <LegendEditor />
-
-      {/* Add/Edit Project Form */}
-      {showAddProject && (
-        <div className="bg-white rounded-lg shadow-md p-6 mb-6">
-          <h3 className="text-lg font-semibold mb-4">
-            {editingProject ? 'Edit Project' : 'Add New Project'}
-          </h3>
-          
-          <form id="projectForm" className="space-y-4">
-            {/* Project Name */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
-                Project Name *
-              </label>
-              <input
-                name="name"
-                type="text"
-                defaultValue={editingProject?.name || ''}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                placeholder="Enter project name"
-                required
-              />
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* Start Date */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Start Date *
-                </label>
-                <input
-                  name="startDate"
-                  type="date"
-                  defaultValue={editingProject?.startDate || ''}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  required
-                />
-              </div>
-
-              {/* Due Date */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  End Date *
-                </label>
-                <input
-                  name="dueDate"
-                  type="date"
-                  defaultValue={editingProject?.dueDate || ''}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  required
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {/* Team Members */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Team Members
-                </label>
-                <select
-                  name="assignedMembers"
-                  multiple
-                  defaultValue={editingProject?.assignedMembers || []}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 h-24"
-                >
-                  {getAllMembers().map(member => (
-                    <option key={`${member.teamId}-${member.name}`} value={member.name}>
-                      {member.name} ({member.teamName})
-                    </option>
-                  ))}
-                </select>
-                <p className="text-xs text-gray-500 mt-1">Hold Ctrl/Cmd to select multiple members</p>
-              </div>
-
-              {/* Priority */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Priority
-                </label>
-                <input
-                  name="priority"
-                  type="number"
-                  defaultValue={editingProject?.priority || ''}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  placeholder="e.g. 1, 2, 3..."
-                />
-              </div>
-            </div>
-
-            {/* Color Selection */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Choose Color:
-              </label>
-              <div className="relative">
-                <div
-                  className="w-16 h-8 border-2 border-gray-300 rounded cursor-pointer flex items-center justify-center"
-                  style={{ backgroundColor: selectedProjectColor }}
-                  onClick={() => setShowColorPicker(!showColorPicker)}
-                >
-                  {selectedProjectColor === projectColors[1] && <span className="text-white">✓</span>}
-                </div>
-                
-                {showColorPicker && (
-                  <div className="absolute top-10 left-0 bg-white border shadow-lg rounded p-3 z-10">
-                    <div className="grid grid-cols-8 gap-2 w-64">
-                      {projectColors.map(color => (
-                        <div
-                          key={color}
-                          className="w-8 h-8 rounded cursor-pointer border-2 hover:border-gray-400 flex items-center justify-center"
-                          style={{ backgroundColor: color }}
-                          onClick={() => {
-                            setSelectedProjectColor(color);
-                            setShowColorPicker(false);
-                          }}
-                        >
-                          {selectedProjectColor === color && (
-                            <span className="text-white font-bold">✓</span>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Milestones Section */}
-            <div>
-              <div className="flex justify-between items-center mb-2">
-                <label className="block text-sm font-medium text-gray-700">
-                  Milestones
-                </label>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const name = prompt('Milestone name:');
-                    const date = prompt('Milestone date (YYYY-MM-DD):');
-                    const legendType = legendTypes.find(t => t.name.toLowerCase() === name?.toLowerCase());
-                    
-                    if (name && date) {
-                      const newMilestone = {
-                        id: Date.now(),
-                        name,
-                        date,
-                        legendTypeId: legendType?.id || legendTypes[0].id
-                      };
-                      
-                      if (editingProject) {
-                        const updatedProject = {
-                          ...editingProject,
-                          milestones: [...(editingProject.milestones || []), newMilestone]
-                        };
-                        setEditingProject(updatedProject);
-                        setProjects(projects.map(p => p.id === editingProject.id ? updatedProject : p));
-                      }
-                    }
-                  }}
-                  className="px-3 py-1 bg-blue-500 text-white text-sm rounded hover:bg-blue-600"
-                >
-                  + Add Milestone
-                </button>
-              </div>
-              
-              <div className="space-y-2 max-h-32 overflow-y-auto">
-                {((editingProject?.milestones) || []).map(milestone => {
-                  const legendType = legendTypes.find(t => t.id === milestone.legendTypeId);
-                  return (
-                    <div key={milestone.id} className="flex items-center justify-between p-2 bg-gray-50 rounded">
-                      <div className="flex items-center gap-3">
-                        <select
-                          value={milestone.legendTypeId}
-                          onChange={(e) => {
-                        <select
-                          value={milestone.legendTypeId}
-                          onChange={(e) => {
-                            const updatedMilestones = editingProject.milestones.map(m =>
-                              m.id === milestone.id ? { ...m, legendTypeId: e.target.value } : m
-                            );
-                            const updatedProject = { ...editingProject, milestones: updatedMilestones };
-                            setEditingProject(updatedProject);
-                            setProjects(projects.map(p => p.id === editingProject.id ? updatedProject : p));
-                          }}
-                          className="text-sm px-2 py-1 border rounded"
-                        >
-                          {legendTypes.map(type => (
-                            <option key={type.id} value={type.id}>{type.name}</option>
-                          ))}
-                        </select>
-                        <input
-                          type="date"
-                          value={milestone.date || ''}
-                          onChange={(e) => {
-                            const updatedMilestones = editingProject.milestones.map(m =>
-                              m.id === milestone.id ? { ...m, date: e.target.value } : m
-                            );
-                            const updatedProject = { ...editingProject, milestones: updatedMilestones };
-                            setEditingProject(updatedProject);
-                            setProjects(projects.map(p => p.id === editingProject.id ? updatedProject : p));
-                          }}
-                          className="text-sm px-2 py-1 border rounded"
-                        />
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const updatedMilestones = editingProject.milestones.filter(m => m.id !== milestone.id);
-                          const updatedProject = { ...editingProject, milestones: updatedMilestones };
-                          setEditingProject(updatedProject);
-                          setProjects(projects.map(p => p.id === editingProject.id ? updatedProject : p));
-                        }}
-                        className="text-red-500 hover:text-red-700"
-                      >
-                        <X className="w-4 h-4" />
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          </form>
-
-          {/* Form Actions */}
-          <div className="flex justify-end gap-3 mt-6">
-            <button
-              type="button"
-              onClick={() => {
-                setShowAddProject(false);
-                setEditingProject(null);
-                setShowColorPicker(false);
-              }}
-              className="px-4 py-2 bg-gray-500 text-white rounded-md hover:bg-gray-600 transition-colors"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                const form = document.getElementById('projectForm');
-                const formData = new FormData(form);
-                
-                const projectData = {
-                  id: editingProject ? editingProject.id : Date.now(),
-                  name: formData.get('name'),
-                  startDate: formData.get('startDate'),
-                  dueDate: formData.get('dueDate'),
-                  priority: formData.get('priority'),
-                  assignedMembers: formData.getAll('assignedMembers'),
-                  projectColor: selectedProjectColor,
-                  milestones: editingProject ? editingProject.milestones || [] : []
-                };
-
-                if (!projectData.name || !projectData.startDate || !projectData.dueDate) {
-                  alert('Please fill in required fields: Name, Start Date, and End Date');
-                  return;
-                }
-
-                if (editingProject) {
-                  setProjects(projects.map(p => p.id === editingProject.id ? projectData : p));
-                } else {
-                  setProjects(prev => [...prev, projectData]);
-                }
-
-                setShowAddProject(false);
-                setEditingProject(null);
-                setShowColorPicker(false);
-                form.reset();
-              }}
-              className="px-4 py-2 bg-green-500 text-white rounded-md hover:bg-green-600 transition-colors"
-            >
-              {editingProject ? 'Update Project' : 'Add Project'}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Projects List */}
-      <div className="bg-white rounded-lg shadow-md">
-        <div className="p-4 border-b border-gray-200">
-          <h3 className="text-lg font-semibold">All Projects</h3>
-        </div>
-        
-        {projects.length === 0 ? (
-          <div className="p-8 text-center text-gray-500">
-            <p>No projects created yet.</p>
-            <button
-              onClick={() => setShowAddProject(true)}
-              className="mt-2 text-blue-500 hover:text-blue-700 font-medium"
-            >
-              Create your first project
-            </button>
-          </div>
-        ) : (
-          <div className="divide-y divide-gray-200">
-            {projects.map(project => (
-              <div key={project.id} className="p-4 hover:bg-gray-50">
-                <div className="flex justify-between items-start">
-                  <div className="flex-1">
-                    <div className="flex items-center gap-3 mb-2">
-                      <h4 className="text-lg font-semibold text-gray-800">{project.name}</h4>
-                      {project.priority && (
-                        <span className="px-2 py-1 bg-gray-100 text-gray-700 text-sm rounded">
-                          Priority: {project.priority}
-                        </span>
-                      )}
-                      <div 
-                        className="w-4 h-4 rounded"
-                        style={{ backgroundColor: project.projectColor }}
-                      />
-                    </div>
-                    
-                    <div className="flex flex-wrap gap-4 text-sm text-gray-500 mb-2">
-                      <span>Start: {new Date(project.startDate).toLocaleDateString()}</span>
-                      <span>Due: {new Date(project.dueDate).toLocaleDateString()}</span>
-                    </div>
-                    
-                    {project.assignedMembers.length > 0 && (
-                      <div className="flex items-center gap-1 flex-wrap">
-                        <span className="text-sm text-gray-500">Assigned:</span>
-                        {project.assignedMembers.map(member => {
-                          const memberData = getAllMembers().find(m => m.name === member);
-                          return (
-                            <span 
-                              key={member}
-                              className="px-2 py-1 bg-blue-100 text-blue-800 text-sm rounded"
-                            >
-                              {member}
-                              {memberData && (
-                                <span className="text-blue-600"> ({memberData.teamName})</span>
-                              )}
-                            </span>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                  
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => {
-                        setEditingProject(project);
-                        setSelectedProjectColor(project.projectColor);
-                        setShowAddProject(true);
-                      }}
-                      className="text-blue-500 hover:text-blue-700 transition-colors"
-                      title="Edit Project"
-                    >
-                      <Settings className="w-4 h-4" />
-                    </button>
-                    <button
-                      onClick={() => {
-                        if (window.confirm('Are you sure you want to delete this project?')) {
-                          setProjects(projects.filter(p => p.id !== project.id));
-                        }
-                      }}
-                      className="text-red-500 hover:text-red-700 transition-colors"
-                      title="Delete Project"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-
-  // Unified View Component
-  const UnifiedView = () => {
-    const columns = generateTimelineColumns();
-    const todayPosition = calculateTodayPosition(columns);
-
-    return (
-      <div className="p-6">
-        <div className="flex justify-between items-center mb-6">
-          <h2 className="text-2xl font-bold text-gray-800">Unified Project Timeline</h2>
-          
-          <div className="flex items-center gap-4">
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={executiveMode}
-                onChange={(e) => setExecutiveMode(e.target.checked)}
-                className="rounded"
-              />
-              <span className="text-sm font-medium">Executive Mode</span>
-            </label>
-          </div>
-        </div>
-
-        {/* Legend Display */}
-        <LegendDisplay />
-
-        {projects.length === 0 ? (
-          <div className="bg-white rounded-lg shadow-md p-8 text-center text-gray-500">
-            <p>No projects to display.</p>
-            <button
-              onClick={() => setActiveTab('projects')}
-              className="mt-2 text-blue-500 hover:text-blue-700 font-medium"
-            >
-              Add your first project
-            </button>
-          </div>
-        ) : (
-          <div className="bg-white rounded-lg shadow-md overflow-auto">
-            {/* Header */}
-            <div className="border-b bg-gray-50 p-4">
-              <div className="flex">
-                <div className="w-64 font-medium">All Projects</div>
-                <div className="flex" style={{ minWidth: `${columns.length * 80}px` }}>
-                  {columns.map((col, index) => (
-                    <div 
-                      key={index} 
-                      className="border-r border-gray-200 text-center text-xs font-medium py-2"
-                      style={{ width: `${col.width}px` }}
-                    >
-                      {col.label}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            {/* Projects */}
-            <div className="divide-y divide-gray-200">
-              {projects.map((project, index) => {
-                const position = calculateProjectPosition(project, columns);
-                
-                return (
-                  <div key={project.id} className="flex items-center hover:bg-gray-50">
-                    <div className="w-64 p-4">
-                      <div className="text-sm font-medium">
-                        {executiveMode ? `Project ${index + 1}` : project.name}
-                      </div>
-                      <div className="text-xs text-gray-500 flex items-center gap-2">
-                        {project.priority && <span>P{project.priority}</span>}
-                        <div 
-                          className="w-3 h-3 rounded"
-                          style={{ backgroundColor: project.projectColor }}
-                        />
-                      </div>
-                      {project.assignedMembers.length > 0 && (
-                        <div className="text-xs text-gray-500 mt-1">
-                          {executiveMode 
-                            ? `${project.assignedMembers.length} resource${project.assignedMembers.length !== 1 ? 's' : ''}`
-                            : project.assignedMembers.slice(0, 2).join(', ') + (project.assignedMembers.length > 2 ? '...' : '')
-                          }
-                        </div>
-                      )}
-                    </div>
-                    
-                    <div className="relative h-12" style={{ minWidth: `${columns.length * 80}px` }}>
-                      {/* Grid lines */}
-                      {columns.map((col, colIndex) => (
-                        <div 
-                          key={colIndex}
-                          className="absolute border-r border-gray-200 h-full"
-                          style={{ left: `${colIndex * 80}px`, width: '1px' }}
-                        />
-                      ))}
-                      
-                      {/* Today line */}
-                      {todayPosition !== null && (
-                        <div
-                          className="absolute top-0 bottom-0 w-0.5 bg-red-500 z-20"
-                          style={{ left: `${todayPosition}%` }}
-                          title={`Today: ${new Date().toLocaleDateString()}`}
-                        />
-                      )}
-                      
-                      {/* Project Bar */}
-                      <div
-                        className="absolute top-1/2 transform -translate-y-1/2 h-4 rounded z-10"
-                        style={{
-                          left: position.left,
-                          width: position.width,
-                          backgroundColor: project.projectColor,
-                          minWidth: '20px'
-                        }}
-                        title={`${project.name}: ${new Date(project.startDate).toLocaleDateString()} - ${new Date(project.dueDate).toLocaleDateString()}`}
-                      />
-
-                      {/* Milestones */}
-                      {(project.milestones || []).map((milestone) => {
-                        const legendType = legendTypes.find(t => t.id === milestone.legendTypeId);
-                        if (!legendType) return null;
-                        
-                        const milestoneDate = new Date(milestone.date);
-                        const range = calculateTimelineRange();
-                        const totalDuration = range.endDate.getTime() - range.startDate.getTime();
-                        const milestoneOffset = milestoneDate.getTime() - range.startDate.getTime();
-                        const milestoneLeftPixels = (milestoneOffset / totalDuration) * (columns.length * 80);
-
-                        const size = legendType.size === 'small' ? 8 : legendType.size === 'medium' ? 12 : 16;
-
-                        return (
-                          <div
-                            key={milestone.id}
-                            className="absolute top-1/2 transform -translate-y-1/2 -translate-x-1/2 z-20"
-                            style={{ left: `${milestoneLeftPixels}px` }}
-                            title={`${legendType.name} - ${new Date(milestone.date).toLocaleDateString()}`}
-                          >
-                            {renderShape(legendType.shape, legendType.color, size)}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  const TeamView = ({ teamId }) => {
-    const team = teams.find(t => t.id === teamId);
-    const teamProjects = projects.filter(project => 
-      project.assignedMembers.some(member => 
-        team?.members.includes(member)
-      )
-    );
-    
-    const columns = generateTimelineColumns();
-    const todayPosition = calculateTodayPosition(columns);
-
-    return (
-      <div className="p-6">
-        <div className="flex justify-between items-center mb-6">
-          <h2 className="text-2xl font-bold text-gray-800">{team?.name} Team Timeline</h2>
-          
-          <div className="flex items-center gap-4">
-            <label className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                checked={executiveMode}
-                onChange={(e) => setExecutiveMode(e.target.checked)}
-                className="rounded"
-              />
-              <span className="text-sm font-medium">Executive Mode</span>
-            </label>
-          </div>
-        </div>
-
-        {/* Legend Display */}
-        <LegendDisplay />
-
-        <div className="bg-white rounded-lg shadow-md overflow-auto">
-          {/* Team Members & Their Projects */}
-          <div className="border-b bg-gray-50 p-4">
-            <div className="flex">
-              <div className="w-64 font-medium">Team Members</div>
-              <div className="flex" style={{ minWidth: `${columns.length * 80}px` }}>
-                {columns.map((col, index) => (
-                  <div 
-                    key={index} 
-                    className="border-r border-gray-200 text-center text-xs font-medium py-2"
-                    style={{ width: `${col.width}px` }}
-                  >
-                    {col.label}
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <div className="divide-y divide-gray-200">
-            {team?.members.map((member, memberIndex) => {
-              const memberProjects = teamProjects.filter(project => 
-                project.assignedMembers.includes(member)
-              );
-
-              return (
-                <div key={member}>
-                  {/* Member Header */}
-                  <div className="bg-blue-50 border-b border-blue-100">
-                    <div className="flex">
-                      <div className="w-64 p-3 font-medium text-blue-800">
-                        {executiveMode ? `Resource ${memberIndex + 1}` : member}
-                        <span className="text-xs text-blue-600 block">
-                          {memberProjects.length} project{memberProjects.length !== 1 ? 's' : ''}
-                        </span>
-                      </div>
-                      <div className="flex-1" style={{ minWidth: `${columns.length * 80}px` }}></div>
-                    </div>
-                  </div>
-
-                  {/* Member's Projects */}
-                  {memberProjects.length === 0 ? (
-                    <div className="flex">
-                      <div className="w-64 p-4"></div>
-                      <div className="flex-1 p-4 text-gray-500 text-sm">
-                        No current projects assigned
-                      </div>
-                    </div>
-                  ) : (
-                    memberProjects.map((project, projectIndex) => {
-                      const position = calculateProjectPosition(project, columns);
-                      return (
-                        <div key={project.id} className="flex items-center hover:bg-gray-50">
-                          <div className="w-64 p-4 pl-8">
-                            <div className="text-sm font-medium">
-                              {executiveMode ? `Project ${projectIndex + 1}` : project.name}
-                            </div>
-                            {project.priority && (
-                              <div className="text-xs text-gray-500">Priority: {project.priority}</div>
-                            )}
-                            <div className="text-xs text-gray-500">
-                              {new Date(project.startDate).toLocaleDateString()} - {new Date(project.dueDate).toLocaleDateString()}
-                            </div>
-                          </div>
-                          
-                          <div className="relative h-12" style={{ minWidth: `${columns.length * 80}px` }}>
-                            {/* Grid lines */}
-                            {columns.map((col, index) => (
-                              <div 
-                                key={index}
-                                className="absolute border-r border-gray-200 h-full"
-                                style={{ left: `${index * 80}px`, width: '1px' }}
-                              />
-                            ))}
-                            
-                            {/* Today line */}
-                            {todayPosition !== null && (
-                              <div
-                                className="absolute top-0 bottom-0 w-0.5 bg-red-500 z-20"
-                                style={{ left: `${todayPosition}%` }}
-                                title={`Today: ${new Date().toLocaleDateString()}`}
-                              />
-                            )}
-                            
-                            {/* Project Bar */}
-                            <div
-                              className="absolute top-1/2 transform -translate-y-1/2 h-4 rounded z-10"
-                              style={{
-                                left: position.left,
-                                width: position.width,
-                                backgroundColor: project.projectColor,
-                                minWidth: '20px'
-                              }}
-                              title={`${project.name}: ${new Date(project.startDate).toLocaleDateString()} - ${new Date(project.dueDate).toLocaleDateString()}`}
-                            />
-
-                            {/* Milestones */}
-                            {(project.milestones || []).map((milestone) => {
-                              const legendType = legendTypes.find(t => t.id === milestone.legendTypeId);
-                              if (!legendType) return null;
-                              
-                              const milestoneDate = new Date(milestone.date);
-                              const range = calculateTimelineRange();
-                              const totalDuration = range.endDate.getTime() - range.startDate.getTime();
-                              const milestoneOffset = milestoneDate.getTime() - range.startDate.getTime();
-                              const milestoneLeftPixels = (milestoneOffset / totalDuration) * (columns.length * 80);
-
-                              const size = legendType.size === 'small' ? 8 : legendType.size === 'medium' ? 12 : 16;
-
-                              return (
-                                <div
-                                  key={milestone.id}
-                                  className="absolute top-1/2 transform -translate-y-1/2 -translate-x-1/2 z-20"
-                                  style={{ left: `${milestoneLeftPixels}px` }}
-                                  title={`${legendType.name} - ${new Date(milestone.date).toLocaleDateString()}`}
-                                >
-                                  {renderShape(legendType.shape, legendType.color, size)}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      </div>
-    );
-  };
-
-  const Reports = () => (
-    <div className="p-6 text-center">
-      <h2 className="text-2xl font-bold mb-4">Reports & Analytics</h2>
-      <p className="text-gray-600">Comprehensive reporting suite will be built in a later section.</p>
-    </div>
-  );
-
-  // Tab content renderer
-  const renderTabContent = () => {
-    switch (activeTab) {
-      case 'unified':
-        return <UnifiedView />;
-      case 'teams':
-        return <TeamManagement />;
-      case 'projects':
-        return <ProjectManagement />;
-      case 'reports':
-        return <Reports />;
-      default:
-        const teamTab = teamTabs.find(tab => tab.id === activeTab);
-        if (teamTab) {
-          return <TeamView teamId={teamTab.teamId} />;
-        }
-        return <UnifiedView />;
-    }
-  };
+function ProjectsManager({ teams, projects, setProjects, legend }:
+  { teams: Team[], projects: Project[], setProjects: React.Dispatch<React.SetStateAction<Project[]>>, legend: LegendSettings }) {
+  const allMembers = teams.flatMap(t => t.members)
+  const addProject = () => setProjects(ps => [...ps, {
+    id: uid(), name: 'New Project', priority: (ps[ps.length - 1]?.priority ?? 0) + 1,
+    teamMemberIds: [], startDates: '', dueDates: '', stabilizationDates: '', completeDates: ''
+  }])
+  const update = (id: string, patch: Partial<Project>) => setProjects(ps => ps.map(p => p.id === id ? { ...p, ...patch } : p))
+  const remove = (id: string) => { if (confirm('Delete this project?')) setProjects(ps => ps.filter(p => p.id !== id)) }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-100">
-      {/* Header */}
-      <header className="bg-white/80 backdrop-blur-sm shadow-sm border-b border-blue-100">
-        <div className="max-w-7xl mx-auto px-4 py-6">
-          <div className="text-center">
-            <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 via-indigo-600 to-slate-700 bg-clip-text text-transparent mb-2">
-              PIRA
-            </h1>
-            <p className="text-lg text-slate-600 font-medium">
-              Project IT Resource Availability
-            </p>
-          </div>
-        </div>
-      </header>
+    <div className="rounded-xl border bg-white p-4 shadow-sm">
+      <div className="mb-3 flex items-center justify-between">
+        <h2 className="text-lg font-semibold">Projects</h2>
+        <button className="pm-outline" onClick={addProject}>＋ Add Project</button>
+      </div>
 
-      {/* Navigation Tabs */}
-      <nav className="bg-white/70 backdrop-blur-sm border-b border-blue-100">
-        <div className="max-w-7xl mx-auto px-4">
-          <div className="flex overflow-x-auto">
-            <button
-              onClick={() => setActiveTab('unified')}
-              className={`px-4 py-3 font-medium text-sm border-b-2 whitespace-nowrap transition-all duration-200 ${
-                activeTab === 'unified' 
-                  ? 'border-blue-500 text-blue-600 bg-blue-50/50' 
-                  : 'border-transparent text-slate-600 hover:text-slate-800 hover:bg-slate-50'
-              }`}
-            >
-              <Calendar className="w-4 h-4 inline mr-2" />
-              Unified View
-            </button>
-
-            {teamTabs.map(tab => (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                className={`px-4 py-3 font-medium text-sm border-b-2 whitespace-nowrap transition-all duration-200 ${
-                  activeTab === tab.id 
-                    ? 'border-blue-500 text-blue-600 bg-blue-50/50' 
-                    : 'border-transparent text-slate-600 hover:text-slate-800 hover:bg-slate-50'
-                }`}
-              >
-                <Users className="w-4 h-4 inline mr-2" />
-                {tab.label}
-              </button>
+      <div className="overflow-x-auto">
+        <table className="min-w-[900px] w-full border text-sm">
+          <thead className="bg-slate-100">
+            <tr>
+              <th className="border px-2 py-1 text-left">Project</th>
+              <th className="border px-2 py-1 text-left">Priority</th>
+              <th className="border px-2 py-1 text-left">Team Members</th>
+              <th className="border px-2 py-1 text-left">Start Dates</th>
+              <th className="border px-2 py-1 text-left">Due Dates</th>
+              <th className="border px-2 py-1 text-left">Stabilization</th>
+              <th className="border px-2 py-1 text-left">Complete</th>
+              <th className="border px-2 py-1"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {projects.map((p) => (
+              <tr key={p.id} className="odd:bg-white even:bg-slate-50">
+                <td className="border px-2 py-1"><input type="text" value={p.name} onChange={e => update(p.id, { name: e.target.value })} /></td>
+                <td className="border px-2 py-1 w-24"><input type="number" value={p.priority} onChange={e => update(p.id, { priority: parseInt(e.target.value || '0', 10) })} /></td>
+                <td className="border px-2 py-1 min-w-[220px]">
+                  <SelectMany
+                    options={allMembers.map(m => ({ id: m.id, label: `${teams.find(t => t.id === m.teamId)?.name ?? ''} - ${m.name}` }))}
+                    value={p.teamMemberIds}
+                    onChange={(ids) => update(p.id, { teamMemberIds: ids })}
+                  />
+                </td>
+                <td className="border px-2 py-1">
+                  <input type="text" placeholder="yyyy-mm-dd, yyyy-mm-dd" value={p.startDates} onChange={e => update(p.id, { startDates: e.target.value })} className="w-56" />
+                </td>
+                <td className="border px-2 py-1">
+                  <input type="text" placeholder="yyyy-mm-dd, yyyy-mm-dd" value={p.dueDates} onChange={e => update(p.id, { dueDates: e.target.value })} className="w-56" />
+                </td>
+                <td className="border px-2 py-1">
+                  <input type="text" placeholder="yyyy-mm-dd, yyyy-mm-dd" value={p.stabilizationDates} onChange={e => update(p.id, { stabilizationDates: e.target.value })} className="w-56" />
+                </td>
+                <td className="border px-2 py-1">
+                  <input type="text" placeholder="yyyy-mm-dd, yyyy-mm-dd" value={p.completeDates} onChange={e => update(p.id, { completeDates: e.target.value })} className="w-56" />
+                </td>
+                <td className="border px-2 py-1 text-right">
+                  <button className="pm-outline" onClick={() => remove(p.id)}>🗑</button>
+                </td>
+              </tr>
             ))}
+          </tbody>
+        </table>
+      </div>
 
-            <button
-              onClick={() => setActiveTab('teams')}
-              className={`px-4 py-3 font-medium text-sm border-b-2 whitespace-nowrap transition-all duration-200 ${
-                activeTab === 'teams' 
-                  ? 'border-indigo-500 text-indigo-600 bg-indigo-50/50' 
-                  : 'border-transparent text-slate-600 hover:text-slate-800 hover:bg-slate-50'
-              }`}
-            >
-              <Settings className="w-4 h-4 inline mr-2" />
-              Teams
-            </button>
+      <div className="mt-3 text-sm text-slate-500">
+        Tip: Enter comma-separated dates (e.g., <code>2025-01-10, 2025-02-15</code>). Invalid entries are ignored.
+      </div>
 
-            <button
-              onClick={() => setActiveTab('projects')}
-              className={`px-4 py-3 font-medium text-sm border-b-2 whitespace-nowrap transition-all duration-200 ${
-                activeTab === 'projects' 
-                  ? 'border-indigo-500 text-indigo-600 bg-indigo-50/50' 
-                  : 'border-transparent text-slate-600 hover:text-slate-800 hover:bg-slate-50'
-              }`}
-            >
-              <Plus className="w-4 h-4 inline mr-2" />
-              Projects
-            </button>
-
-            <button
-              onClick={() => setActiveTab('reports')}
-              className={`px-4 py-3 font-medium text-sm border-b-2 whitespace-nowrap transition-all duration-200 ${
-                activeTab === 'reports' 
-                  ? 'border-indigo-500 text-indigo-600 bg-indigo-50/50' 
-                  : 'border-transparent text-slate-600 hover:text-slate-800 hover:bg-slate-50'
-              }`}
-            >
-              <BarChart3 className="w-4 h-4 inline mr-2" />
-              Reports
-            </button>
-          </div>
-        </div>
-      </nav>
-
-      {/* Main Content */}
-      <main className="max-w-7xl mx-auto">
-        {renderTabContent()}
-      </main>
+      <div className="mt-4 rounded-lg border p-3">
+        <div className="mb-2 font-medium">Legend (applies everywhere)</div>
+        <LegendInline legend={legend} />
+      </div>
     </div>
-  );
-};
+  )
+}
 
-export default ProjectManagementApp;
+function SelectMany({ options, value, onChange }:
+  { options: { id: string; label: string }[], value: string[], onChange: (ids: string[]) => void }) {
+  const toggle = (id: string) => onChange(value.includes(id) ? value.filter(x => x !== id) : [...value, id])
+  return (
+    <div className="flex flex-wrap gap-2">
+      {options.map(opt => (
+        <label key={opt.id} className={"badge cursor-pointer " + (value.includes(opt.id) ? "bg-sky-100 border-sky-300" : "")}>
+          <input type="checkbox" className="mr-1" checked={value.includes(opt.id)} onChange={() => toggle(opt.id)} />
+          {opt.label}
+        </label>
+      ))}
+    </div>
+  )
+}
+
+function TimelineView({
+  tabKey, teams, projects, legend, view, setView, executive, openLegend
+}: {
+  tabKey: string
+  teams: Team[]
+  projects: Project[]
+  legend: LegendSettings
+  view: ViewState
+  setView: (partial: Partial<ViewState>) => void
+  executive: boolean
+  openLegend: () => void
+}) {
+  const filtered = useMemo(() => {
+    if (tabKey === 'Unified' || tabKey === 'Teams' || tabKey === 'Projects') return projects
+    const teamId = tabKey
+    const memberIds = teams.find(t => t.id === teamId)?.members.map(m => m.id) ?? []
+    return projects.filter(p => p.teamMemberIds.some(id => memberIds.includes(id)))
+  }, [tabKey, projects, teams])
+
+  const start = parseDate(view.startDate) ?? new Date()
+  const end = parseDate(view.endDate) ?? addDays(start, 90)
+  const spanMs = Math.max(1, end.getTime() - start.getTime())
+  const today = view.useSystemToday ? new Date() : (parseDate(view.manualToday) ?? new Date())
+
+  const ticks = Array.from(tickGenerator(start, end, view.granularity))
+  const pos = (d: Date) => clamp(((d.getTime() - start.getTime()) / spanMs) * 100)
+
+  const rows = filtered
+    .map(p => {
+      const datesByType: Record<MilestoneType, Date[]> = {
+        start: parseCommaDates(p.startDates),
+        due: parseCommaDates(p.dueDates),
+        stabilization: parseCommaDates(p.stabilizationDates),
+        complete: parseCommaDates(p.completeDates),
+      }
+      const span = getProjectSpan(p)
+      return { project: p, datesByType, span }
+    })
+    .filter(r => r.span.start && r.span.end)
+
+  return (
+    <div className="rounded-xl border bg-white p-4 shadow-sm">
+      <div className="mb-3 flex items-center justify-between">
+        <div className="text-sm text-slate-600">
+          Range: <span className="font-medium">{fmt(start)}</span> → <span className="font-medium">{fmt(end)}</span> •{' '}
+          Granularity: <span className="font-medium capitalize">{view.granularity}</span>
+        </div>
+        <button className="pm-outline" onClick={openLegend}>Legend</button>
+      </div>
+
+      <div className="relative overflow-hidden rounded-lg border">
+        {/* scale */}
+        <div className="relative h-10 bg-slate-100">
+          {ticks.map((t, i) => (
+            <div key={i} className="absolute top-0 h-full border-l border-slate-300 text-[10px] text-slate-700" style={{ left: pos(t) + '%' }}>
+              <div className="absolute -top-1 -translate-x-1/2 whitespace-nowrap px-1">
+                {labelForTick(t, view.granularity)}
+              </div>
+            </div>
+          ))}
+          {/* Today line */}
+          <div className="absolute inset-y-0 w-px bg-rose-500" style={{ left: pos(today) + '%' }} title={"Today: " + fmt(today)}></div>
+        </div>
+
+        {/* rows */}
+        <div className="divide-y">
+          {rows.map((r, idx) => (
+            <div key={r.project.id} className="relative h-16">
+              <div
+                className="absolute top-1/2 -translate-y-1/2 h-3 rounded-full"
+                style={{
+                  left: pos(r.span.start!) + '%',
+                  width: (pos(r.span.end!) - pos(r.span.start!)) + '%',
+                  background: legend.barColor
+                }}
+                title={`${r.project.name}: ${fmt(r.span.start!)} → ${fmt(r.span.end!)}`}
+              />
+              {ALL_TYPES.map((mt) =>
+                r.datesByType[mt].map((d, i) => (
+                  <Milestone key={mt + i + d.toISOString()} x={pos(d)} type={mt} legend={legend} date={d} />
+                ))
+              )}
+              <div className="absolute left-2 top-1 text-sm font-medium">
+                {executive ? `Project ${idx + 1}` : `${r.project.priority}. ${r.project.name}`}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {rows.length === 0 && (
+        <div className="mt-4 text-sm text-slate-500">No projects in range. Add dates in the Projects tab or adjust the range.</div>
+      )}
+    </div>
+  )
+}
+
+function labelForTick(d: Date, g: Granularity) {
+  if (g === 'weeks') {
+    const wk = Math.ceil(d.getDate() / 7)
+    return `${d.getFullYear()}-${(d.getMonth()+1).toString().padStart(2,'0')} W${wk}`
+  }
+  if (g === 'months') return `${d.getFullYear()}-${(d.getMonth()+1).toString().padStart(2,'0')}`
+  if (g === 'quarters') return `Q${Math.floor(d.getMonth()/3)+1} ${d.getFullYear()}`
+  return `${d.getFullYear()}`
+}
+
+function Milestone({ x, type, legend, date }:
+  { x: number, type: MilestoneType, legend: LegendSettings, date: Date }) {
+  const style: React.CSSProperties = {
+    position: 'absolute',
+    left: x + '%',
+    top: '50%',
+    transform: 'translate(-50%, -50%)',
+    color: legend.milestone[type].color
+  }
+  const sz = legend.milestone[type].size
+  const fill = legend.milestone[type].color
+  const title = `${type.toUpperCase()} • ${date.toISOString().slice(0,10)}`
+  const shape = legend.milestone[type].shape
+
+  return (
+    <div style={style} title={title}>
+      {shape === 'circle'   && <div style={{ width: sz, height: sz, borderRadius: '9999px', background: fill }} />}
+      {shape === 'square'   && <div style={{ width: sz, height: sz, background: fill }} />}
+      {shape === 'diamond'  && (
+        <svg width={sz} height={sz} viewBox="0 0 100 100" aria-hidden>
+          <polygon points="50,0 100,50 50,100 0,50" fill={fill} />
+        </svg>
+      )}
+      {shape === 'triangle' && (
+        <svg width={sz} height={sz} viewBox="0 0 100 100" aria-hidden>
+          <polygon points="50,0 100,100 0,100" fill={fill} />
+        </svg>
+      )}
+    </div>
+  )
+}
+
+function LegendInline({ legend }: { legend: LegendSettings }) {
+  return (
+    <div className="flex flex-wrap items-center gap-4 text-sm">
+      <div className="flex items-center gap-2">
+        <span className="w-10 h-2 rounded-full" style={{ background: legend.barColor }}></span>
+        <span>Project bar</span>
+      </div>
+      {ALL_TYPES.map(mt => (
+        <div key={mt} className="flex items-center gap-2">
+          <Milestone x={0} type={mt} legend={legend} date={new Date()} />
+          <span className="capitalize">{mt}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
