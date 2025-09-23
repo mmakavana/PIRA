@@ -11,12 +11,10 @@ type Project = {
   name: string
   priority: number
   teamMemberIds: string[]
-  // four comma-separated date fields
   startDates: string
   dueDates: string
   stabilizationDates: string
   completeDates: string
-  // new flag for Completed tab + filters
   completed: boolean
 }
 
@@ -34,7 +32,7 @@ type ViewState = {
   executiveMode: boolean
   useSystemToday: boolean
   manualToday: string
-  includeCompleted: boolean   // show/hide completed on this tab
+  includeCompleted: boolean
 }
 type ViewsMap = Record<string, ViewState>
 
@@ -143,10 +141,8 @@ export default function ProjectManagementApp() {
   useEffect(() => { save('pm_views', views) }, [views])
   useEffect(() => { ensureView(activeTab) }, [activeTab])
 
-  // Tabs include the Completed tab
   const tabs = useMemo(() => ['Unified', 'Completed', ...teams.map(t => t.id), 'Teams', 'Projects'], [teams])
 
-  // Auto-range (respects filters and the Completed tab)
   const view = views[activeTab] ?? defaultView()
   useEffect(() => {
     const v = views[activeTab]
@@ -496,7 +492,7 @@ function TimelineView({
   projects: Project[]
   legend: LegendSettings
   view: ViewState
-  setView: (partial: Partial<ViewState>) => void   // kept for compatibility
+  setView: (partial: Partial<ViewState>) => void
   executive: boolean
   openLegend: () => void
 }) {
@@ -544,7 +540,6 @@ function TimelineView({
       </div>
 
       <div className="relative overflow-hidden rounded-lg border">
-        {/* scale */}
         <div className="relative h-10 bg-slate-100">
           {ticks.map((t, i) => (
             <div key={i} className="absolute top-0 h-full border-l border-slate-300 text-[10px] text-slate-700" style={{ left: pos(t) + '%' }}>
@@ -553,11 +548,9 @@ function TimelineView({
               </div>
             </div>
           ))}
-          {/* today */}
           <div className="absolute inset-y-0 w-px bg-rose-500" style={{ left: pos(today) + '%' }} title={"Today: " + fmt(today)}></div>
         </div>
 
-        {/* rows */}
         <div className="divide-y">
           {rows.map((r, idx) => (
             <div key={r.project.id} className="relative h-16">
