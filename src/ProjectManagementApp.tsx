@@ -11,11 +11,11 @@ type Project = {
   name: string
   priority: number
   teamMemberIds: string[]
-  // Comma-separated strings per requirement
   startDates: string
   dueDates: string
   stabilizationDates: string
   completeDates: string
+  completed: boolean              // <— new
 }
 
 type Shape = 'circle' | 'diamond' | 'square' | 'triangle'
@@ -32,6 +32,7 @@ type ViewState = {
   executiveMode: boolean
   useSystemToday: boolean
   manualToday: string
+  includeCompleted: boolean       // <— per-tab include/hide completed
 }
 type ViewsMap = Record<string, ViewState>
 
@@ -41,10 +42,8 @@ const fmt = (d: Date) => d.toISOString().slice(0, 10)
 const addDays = (d: Date, days: number) => { const x = new Date(d); x.setDate(x.getDate() + days); return x }
 
 const parseDate = (s: string): Date | null => {
-  const t = s.trim()
-  if (!t) return null
-  const d = new Date(t)
-  if (isNaN(d.getTime())) return null
+  const t = s.trim(); if (!t) return null
+  const d = new Date(t); if (isNaN(d.getTime())) return null
   return new Date(d.getFullYear(), d.getMonth(), d.getDate())
 }
 const parseCommaDates = (value: string): Date[] =>
@@ -89,6 +88,7 @@ const defaultView = (): ViewState => ({
   executiveMode: false,
   useSystemToday: true,
   manualToday: todayISO(),
+  includeCompleted: true,        // default to show all
 })
 
 function load<T>(key: string, fallback: T): T {
@@ -120,7 +120,8 @@ export default function ProjectManagementApp() {
     load<Project[]>('pm_projects', [{
       id: uid(), name: 'Unified Auth', priority: 1, teamMemberIds: [],
       startDates: '2025-01-10', dueDates: '2025-02-15',
-      stabilizationDates: '2025-03-01', completeDates: ''
+      stabilizationDates: '2025-03-01', completeDates: '',
+      completed: false
     }])
   )
   const [legend, setLegend] = useState<LegendSettings>(() => load('pm_legend', defaultLegend))
@@ -128,9 +129,7 @@ export default function ProjectManagementApp() {
   const [activeTab, setActiveTab] = useState<string>('Unified')
   const [showLegend, setShowLegend] = useState(false)
 
-  const ensureView = (key: string) => {
-    if (!views[key]) setViews(v => ({ ...v, [key]: defaultView() }))
-  }
+  const ensureView = (key: string) => { if (!views[key]) setViews(v => ({ ...v, [key]: defaultView() })) }
   useEffect(() => { ensureView('Unified') }, [])
   useEffect(() => { save('pm_teams', teams) }, [teams])
   useEffect(() => { save('pm_projects', projects) }, [projects])
@@ -138,28 +137,39 @@ export default function ProjectManagementApp() {
   useEffect(() => { save('pm_views', views) }, [views])
   useEffect(() => { ensureView(activeTab) }, [activeTab])
 
-  const tabs = useMemo(() => ['Unified', ...teams.map(t => t.id), 'Teams', 'Projects'], [teams])
+  // Tab order includes Completed
+  const tabs = useMemo(() => ['Unified', 'Completed', ...teams.map(t => t.id), 'Teams', 'Projects'], [teams])
 
-  // Auto-range per tab (keeps visual window in sync with table data)
+  // Auto-range per tab (respects the completed filter)
   useEffect(() => {
     const v = views[activeTab]
     if (!v?.autoRange) return
     let relevant = projects
-    if (activeTab !== 'Unified' && activeTab !== 'Teams' && activeTab !== 'Projects') {
+
+    if (activeTab === 'Completed') {
+      relevant = relevant.filter(p => p.completed)
+    } else if (activeTab !== 'Unified' && activeTab !== 'Teams' && activeTab !== 'Projects') {
       const teamId = activeTab
       const memberIds = teams.find(t => t.id === teamId)?.members.map(m => m.id) ?? []
-      relevant = projects.filter(p => p.teamMemberIds.some(id => memberIds.includes(id)))
+      relevant = relevant.filter(p => p.teamMemberIds.some(id => memberIds.includes(id)))
+      if (!v.includeCompleted) relevant = relevant.filter(p => !p.completed)
+    } else {
+      if (!v.includeCompleted) relevant = relevant.filter(p => !p.completed)
     }
+
     const all = relevant.flatMap(getProjectAllDates)
     if (!all.length) return
     const start = addDays(all[0], -7)
     const end = addDays(all[all.length - 1], +7)
     setViews(vs => ({ ...vs, [activeTab]: { ...vs[activeTab], startDate: fmt(start), endDate: fmt(end) } }))
-  }, [projects, teams, activeTab]) // stays aligned with data
+  }, [projects, teams, activeTab])
+
+  const renderTabLabel = (key: string) => {
+    if (key === 'Unified' || key === 'Teams' || key === 'Projects' || key === 'Completed') return key
+    return `Team – ${teams.find(t => t.id === key)?.name ?? key}`
+  }
 
   const view = views[activeTab] ?? defaultView()
-  const renderTabLabel = (key: string) =>
-    key === 'Unified' || key === 'Teams' || key === 'Projects' ? key : `Team – ${teams.find(t => t.id === key)?.name ?? key}`
 
   return (
     <div className="mx-auto max-w-[1200px] p-4">
@@ -181,6 +191,7 @@ export default function ProjectManagementApp() {
       <PanelControls
         view={view}
         onChange={next => setViews(v => ({ ...v, [activeTab]: { ...v[activeTab], ...next } }))}
+        showCompletedToggle={activeTab !== 'Completed'}  // hide toggle on Completed tab
       />
 
       <div className="mt-4">
@@ -190,7 +201,7 @@ export default function ProjectManagementApp() {
         {activeTab === 'Teams' && (
           <TeamsManager teams={teams} setTeams={setTeams} executive={view.executiveMode} />
         )}
-        {(activeTab === 'Unified' || (activeTab !== 'Teams' && activeTab !== 'Projects')) && (
+        {(activeTab === 'Unified' || activeTab === 'Completed' || (activeTab !== 'Teams' && activeTab !== 'Projects')) && (
           <TimelineView
             key={'tl-' + activeTab}
             tabKey={activeTab}
@@ -210,7 +221,9 @@ export default function ProjectManagementApp() {
   )
 }
 
-function PanelControls({ view, onChange }: { view: ViewState, onChange: (partial: Partial<ViewState>) => void }) {
+function PanelControls({
+  view, onChange, showCompletedToggle
+}: { view: ViewState, onChange: (partial: Partial<ViewState>) => void, showCompletedToggle: boolean }) {
   return (
     <div className="rounded-xl border bg-white p-3 shadow-sm">
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -253,6 +266,20 @@ function PanelControls({ view, onChange }: { view: ViewState, onChange: (partial
           )}
         </div>
       </div>
+
+      {showCompletedToggle && (
+        <div className="mt-3">
+          <label className="badge mr-2">Show completed</label>
+          <input
+            type="checkbox"
+            checked={view.includeCompleted}
+            onChange={e => onChange({ includeCompleted: e.target.checked, autoRange: false })}
+          />
+          <span className="ml-2 text-sm text-slate-500">
+            Off = hide completed; On = show all
+          </span>
+        </div>
+      )}
     </div>
   )
 }
@@ -368,7 +395,7 @@ function ProjectsManager({ teams, projects, setProjects, legend }:
   const allMembers = teams.flatMap(t => t.members)
   const addProject = () => setProjects(ps => [...ps, {
     id: uid(), name: 'New Project', priority: (ps[ps.length - 1]?.priority ?? 0) + 1,
-    teamMemberIds: [], startDates: '', dueDates: '', stabilizationDates: '', completeDates: ''
+    teamMemberIds: [], startDates: '', dueDates: '', stabilizationDates: '', completeDates: '', completed: false
   }])
   const update = (id: string, patch: Partial<Project>) => setProjects(ps => ps.map(p => p.id === id ? { ...p, ...patch } : p))
   const remove = (id: string) => { if (confirm('Delete this project?')) setProjects(ps => ps.filter(p => p.id !== id)) }
@@ -381,11 +408,12 @@ function ProjectsManager({ teams, projects, setProjects, legend }:
       </div>
 
       <div className="overflow-x-auto">
-        <table className="min-w-[900px] w-full border text-sm">
+        <table className="min-w-[1000px] w-full border text-sm">
           <thead className="bg-slate-100">
             <tr>
               <th className="border px-2 py-1 text-left">Project</th>
               <th className="border px-2 py-1 text-left">Priority</th>
+              <th className="border px-2 py-1 text-left">Completed?</th>   {/* new */}
               <th className="border px-2 py-1 text-left">Team Members</th>
               <th className="border px-2 py-1 text-left">Start Dates</th>
               <th className="border px-2 py-1 text-left">Due Dates</th>
@@ -399,7 +427,10 @@ function ProjectsManager({ teams, projects, setProjects, legend }:
               <tr key={p.id} className="odd:bg-white even:bg-slate-50">
                 <td className="border px-2 py-1"><input type="text" value={p.name} onChange={e => update(p.id, { name: e.target.value })} /></td>
                 <td className="border px-2 py-1 w-24"><input type="number" value={p.priority} onChange={e => update(p.id, { priority: parseInt(e.target.value || '0', 10) })} /></td>
-                <td className="border px-2 py-1 min-w-[220px]">
+                <td className="border px-2 py-1 w-24">
+                  <input type="checkbox" checked={p.completed} onChange={e => update(p.id, { completed: e.target.checked })} />
+                </td>
+                <td className="border px-2 py-1 min-w-[240px]">
                   <SelectMany
                     options={allMembers.map(m => ({ id: m.id, label: `${teams.find(t => t.id === m.teamId)?.name ?? ''} - ${m.name}` }))}
                     value={p.teamMemberIds}
@@ -455,23 +486,29 @@ function SelectMany({ options, value, onChange }:
 }
 
 function TimelineView({
-  tabKey, teams, projects, legend, view, setView, executive, openLegend
+  tabKey, teams, projects, legend, view, executive, openLegend
 }: {
   tabKey: string
   teams: Team[]
   projects: Project[]
   legend: LegendSettings
   view: ViewState
-  setView: (partial: Partial<ViewState>) => void
   executive: boolean
   openLegend: () => void
 }) {
-  const filtered = useMemo(() => {
-    if (tabKey === 'Unified' || tabKey === 'Teams' || tabKey === 'Projects') return projects
+  // Base list
+  let list = projects
+
+  if (tabKey === 'Completed') {
+    list = list.filter(p => p.completed)
+  } else if (tabKey !== 'Unified' && tabKey !== 'Teams' && tabKey !== 'Projects') {
     const teamId = tabKey
     const memberIds = teams.find(t => t.id === teamId)?.members.map(m => m.id) ?? []
-    return projects.filter(p => p.teamMemberIds.some(id => memberIds.includes(id)))
-  }, [tabKey, projects, teams])
+    list = list.filter(p => p.teamMemberIds.some(id => memberIds.includes(id)))
+    if (!view.includeCompleted) list = list.filter(p => !p.completed)
+  } else {
+    if (!view.includeCompleted) list = list.filter(p => !p.completed)
+  }
 
   const start = parseDate(view.startDate) ?? new Date()
   const end = parseDate(view.endDate) ?? addDays(start, 90)
@@ -481,7 +518,7 @@ function TimelineView({
   const ticks = Array.from(tickGenerator(start, end, view.granularity))
   const pos = (d: Date) => clamp(((d.getTime() - start.getTime()) / spanMs) * 100)
 
-  const rows = filtered
+  const rows = list
     .map(p => {
       const datesByType: Record<MilestoneType, Date[]> = {
         start: parseCommaDates(p.startDates),
@@ -514,7 +551,7 @@ function TimelineView({
               </div>
             </div>
           ))}
-          {/* Today line */}
+          {/* today */}
           <div className="absolute inset-y-0 w-px bg-rose-500" style={{ left: pos(today) + '%' }} title={"Today: " + fmt(today)}></div>
         </div>
 
@@ -552,10 +589,7 @@ function TimelineView({
 }
 
 function labelForTick(d: Date, g: Granularity) {
-  if (g === 'weeks') {
-    const wk = Math.ceil(d.getDate() / 7)
-    return `${d.getFullYear()}-${(d.getMonth()+1).toString().padStart(2,'0')} W${wk}`
-  }
+  if (g === 'weeks') { const wk = Math.ceil(d.getDate() / 7); return `${d.getFullYear()}-${(d.getMonth()+1).toString().padStart(2,'0')} W${wk}` }
   if (g === 'months') return `${d.getFullYear()}-${(d.getMonth()+1).toString().padStart(2,'0')}`
   if (g === 'quarters') return `Q${Math.floor(d.getMonth()/3)+1} ${d.getFullYear()}`
   return `${d.getFullYear()}`
@@ -564,11 +598,8 @@ function labelForTick(d: Date, g: Granularity) {
 function Milestone({ x, type, legend, date }:
   { x: number, type: MilestoneType, legend: LegendSettings, date: Date }) {
   const style: React.CSSProperties = {
-    position: 'absolute',
-    left: x + '%',
-    top: '50%',
-    transform: 'translate(-50%, -50%)',
-    color: legend.milestone[type].color
+    position: 'absolute', left: x + '%', top: '50%',
+    transform: 'translate(-50%, -50%)', color: legend.milestone[type].color
   }
   const sz = legend.milestone[type].size
   const fill = legend.milestone[type].color
