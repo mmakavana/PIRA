@@ -169,7 +169,6 @@ export default function ProjectManagementApp() {
     const start = addDays(all[0], -7)
     const end = addDays(all[all.length - 1], +7)
     setViews(vs => ({ ...vs, [activeTab]: { ...vs[activeTab], startDate: fmt(start), endDate: fmt(end) } }))
-  // includeCompleted in deps so changing the toggle re-applies auto-range
   }, [projects, teams, activeTab, view.includeCompleted])
 
   const renderTabLabel = (key: string) => {
@@ -215,7 +214,7 @@ export default function ProjectManagementApp() {
             projects={projects}
             legend={legend}
             view={view}
-            setView={() => {}}  // not used here, but kept for compatibility
+            setView={() => {}}
             executive={view.executiveMode}
             openLegend={() => setShowLegend(true)}
           />
