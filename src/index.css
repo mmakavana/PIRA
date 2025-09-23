@@ -1,4 +1,27 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
-body { @apply bg-pira-light font-candara; }
+
+:root { --pm-accent: #0ea5e9; }
+
+body { @apply text-slate-800; }
+
+input[type="date"],
+input[type="text"],
+select,
+textarea {
+  @apply border rounded-md px-2 py-1 outline-none border-slate-300
+         focus:ring-2 focus:ring-sky-400 focus:border-sky-400 bg-white;
+}
+
+button.pm {
+  @apply rounded-lg px-3 py-1.5 bg-slate-800 text-white
+         hover:bg-slate-700 active:bg-slate-900 transition;
+}
+button.pm-outline {
+  @apply rounded-lg px-3 py-1.5 border border-slate-300 bg-white hover:bg-slate-50;
+}
+
+.badge {
+  @apply inline-block rounded-full px-2 py-0.5 text-xs font-medium bg-slate-100 border border-slate-200;
+}
