@@ -11,11 +11,13 @@ type Project = {
   name: string
   priority: number
   teamMemberIds: string[]
+  // four comma-separated date fields
   startDates: string
   dueDates: string
   stabilizationDates: string
   completeDates: string
-  completed: boolean              // <— new
+  // new flag for Completed tab + filters
+  completed: boolean
 }
 
 type Shape = 'circle' | 'diamond' | 'square' | 'triangle'
@@ -32,7 +34,7 @@ type ViewState = {
   executiveMode: boolean
   useSystemToday: boolean
   manualToday: string
-  includeCompleted: boolean       // <— per-tab include/hide completed
+  includeCompleted: boolean   // show/hide completed on this tab
 }
 type ViewsMap = Record<string, ViewState>
 
@@ -47,7 +49,9 @@ const parseDate = (s: string): Date | null => {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate())
 }
 const parseCommaDates = (value: string): Date[] =>
-  value.split(',').map(parseDate).filter((d): d is Date => !!d)
+  value.split(',')
+       .map(parseDate)
+       .filter((d): d is Date => !!d)
        .sort((a, b) => a.getTime() - b.getTime())
 
 function* tickGenerator(start: Date, end: Date, g: Granularity): Generator<Date, void, unknown> {
@@ -88,7 +92,7 @@ const defaultView = (): ViewState => ({
   executiveMode: false,
   useSystemToday: true,
   manualToday: todayISO(),
-  includeCompleted: true,        // default to show all
+  includeCompleted: true,
 })
 
 function load<T>(key: string, fallback: T): T {
@@ -114,8 +118,9 @@ export default function ProjectManagementApp() {
     load<Team[]>('pm_teams', [
       { id: uid(), name: 'AppDev', members: [{ id: uid(), name: 'Ava', teamId: 'TBD' }] },
       { id: uid(), name: 'Infra', members: [{ id: uid(), name: 'Noah', teamId: 'TBD' }] },
-    ].map(t => ({...t, members: t.members.map(m => ({...m, teamId: t.id}))})))
+    ].map(t => ({ ...t, members: t.members.map(m => ({ ...m, teamId: t.id })) })))
   )
+
   const [projects, setProjects] = useState<Project[]>(() =>
     load<Project[]>('pm_projects', [{
       id: uid(), name: 'Unified Auth', priority: 1, teamMemberIds: [],
@@ -124,6 +129,7 @@ export default function ProjectManagementApp() {
       completed: false
     }])
   )
+
   const [legend, setLegend] = useState<LegendSettings>(() => load('pm_legend', defaultLegend))
   const [views, setViews] = useState<ViewsMap>(() => load('pm_views', {}))
   const [activeTab, setActiveTab] = useState<string>('Unified')
@@ -137,15 +143,16 @@ export default function ProjectManagementApp() {
   useEffect(() => { save('pm_views', views) }, [views])
   useEffect(() => { ensureView(activeTab) }, [activeTab])
 
-  // Tab order includes Completed
+  // Tabs include the Completed tab
   const tabs = useMemo(() => ['Unified', 'Completed', ...teams.map(t => t.id), 'Teams', 'Projects'], [teams])
 
-  // Auto-range per tab (respects the completed filter)
+  // Auto-range (respects filters and the Completed tab)
+  const view = views[activeTab] ?? defaultView()
   useEffect(() => {
     const v = views[activeTab]
     if (!v?.autoRange) return
-    let relevant = projects
 
+    let relevant = projects
     if (activeTab === 'Completed') {
       relevant = relevant.filter(p => p.completed)
     } else if (activeTab !== 'Unified' && activeTab !== 'Teams' && activeTab !== 'Projects') {
@@ -162,14 +169,13 @@ export default function ProjectManagementApp() {
     const start = addDays(all[0], -7)
     const end = addDays(all[all.length - 1], +7)
     setViews(vs => ({ ...vs, [activeTab]: { ...vs[activeTab], startDate: fmt(start), endDate: fmt(end) } }))
-  }, [projects, teams, activeTab])
+  // includeCompleted in deps so changing the toggle re-applies auto-range
+  }, [projects, teams, activeTab, view.includeCompleted])
 
   const renderTabLabel = (key: string) => {
     if (key === 'Unified' || key === 'Teams' || key === 'Projects' || key === 'Completed') return key
     return `Team – ${teams.find(t => t.id === key)?.name ?? key}`
   }
-
-  const view = views[activeTab] ?? defaultView()
 
   return (
     <div className="mx-auto max-w-[1200px] p-4">
@@ -191,7 +197,7 @@ export default function ProjectManagementApp() {
       <PanelControls
         view={view}
         onChange={next => setViews(v => ({ ...v, [activeTab]: { ...v[activeTab], ...next } }))}
-        showCompletedToggle={activeTab !== 'Completed'}  // hide toggle on Completed tab
+        showCompletedToggle={activeTab !== 'Completed'}
       />
 
       <div className="mt-4">
@@ -209,7 +215,7 @@ export default function ProjectManagementApp() {
             projects={projects}
             legend={legend}
             view={view}
-            setView={partial => setViews(v => ({ ...v, [activeTab]: { ...v[activeTab], ...partial } }))}
+            setView={() => {}}  // not used here, but kept for compatibility
             executive={view.executiveMode}
             openLegend={() => setShowLegend(true)}
           />
@@ -273,11 +279,9 @@ function PanelControls({
           <input
             type="checkbox"
             checked={view.includeCompleted}
-            onChange={e => onChange({ includeCompleted: e.target.checked, autoRange: false })}
+            onChange={e => onChange({ includeCompleted: e.target.checked })}
           />
-          <span className="ml-2 text-sm text-slate-500">
-            Off = hide completed; On = show all
-          </span>
+          <span className="ml-2 text-sm text-slate-500">Off = hide completed; On = show all</span>
         </div>
       )}
     </div>
@@ -413,7 +417,7 @@ function ProjectsManager({ teams, projects, setProjects, legend }:
             <tr>
               <th className="border px-2 py-1 text-left">Project</th>
               <th className="border px-2 py-1 text-left">Priority</th>
-              <th className="border px-2 py-1 text-left">Completed?</th>   {/* new */}
+              <th className="border px-2 py-1 text-left">Completed?</th>
               <th className="border px-2 py-1 text-left">Team Members</th>
               <th className="border px-2 py-1 text-left">Start Dates</th>
               <th className="border px-2 py-1 text-left">Due Dates</th>
@@ -486,19 +490,18 @@ function SelectMany({ options, value, onChange }:
 }
 
 function TimelineView({
-  tabKey, teams, projects, legend, view, executive, openLegend
+  tabKey, teams, projects, legend, view, setView, executive, openLegend
 }: {
   tabKey: string
   teams: Team[]
   projects: Project[]
   legend: LegendSettings
   view: ViewState
+  setView: (partial: Partial<ViewState>) => void   // kept for compatibility
   executive: boolean
   openLegend: () => void
 }) {
-  // Base list
   let list = projects
-
   if (tabKey === 'Completed') {
     list = list.filter(p => p.completed)
   } else if (tabKey !== 'Unified' && tabKey !== 'Teams' && tabKey !== 'Projects') {
