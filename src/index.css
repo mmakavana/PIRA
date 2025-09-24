@@ -2,9 +2,9 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Shared UI helpers (unchanged look & feel) */
 :root { --pm-accent: #0ea5e9; }
 body { @apply text-slate-800; }
-
 input[type="date"], input[type="text"], select, textarea {
   @apply border rounded-md px-2 py-1 outline-none border-slate-300
          focus:ring-2 focus:ring-sky-400 focus:border-sky-400 bg-white;
@@ -15,3 +15,9 @@ button.pm {
 }
 button.pm-outline { @apply rounded-lg px-3 py-1.5 border border-slate-300 bg-white hover:bg-slate-50; }
 .badge { @apply inline-block rounded-full px-2 py-0.5 text-xs font-medium bg-slate-100 border border-slate-200; }
+
+/* Timeline layout tweaks */
+.tl-name-cell { @apply h-14 flex items-center pl-2 border-b border-slate-200 bg-white; }
+.tl-scale { @apply relative h-10 bg-slate-100; }
+.tl-row { @apply relative h-14 border-t border-slate-100; }
+.tl-scroll { @apply overflow-x-auto; }
