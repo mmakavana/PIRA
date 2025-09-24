@@ -1,7 +1,10 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+import html2canvas from 'html2canvas'
+import jsPDF from 'jspdf'
 
 type Granularity = 'weeks' | 'months' | 'quarters' | 'years'
 type MilestoneType = 'start' | 'due' | 'stabilization' | 'complete'
+type Shape = 'circle' | 'diamond' | 'square' | 'triangle'
 
 type Member = { id: string; name: string; teamId: string }
 type Team = { id: string; name: string; members: Member[] }
@@ -18,7 +21,6 @@ type Project = {
   completed: boolean
 }
 
-type Shape = 'circle' | 'diamond' | 'square' | 'triangle'
 type LegendSettings = {
   barColor: string
   milestone: Record<MilestoneType, { color: string; shape: Shape; size: number }>
@@ -33,13 +35,15 @@ type ViewState = {
   useSystemToday: boolean
   manualToday: string
   includeCompleted: boolean
+  zoom: number  // 0.5 - 2.0
 }
 type ViewsMap = Record<string, ViewState>
 
 const uid = () => Math.random().toString(36).slice(2, 10)
 const dayMs = 24 * 60 * 60 * 1000
-const clamp = (n: number, min = 0, max = 1) => Math.min(max, Math.max(min, n))
-const fmt = (d: Date) => d.toISOString().slice(0, 10)
+const clamp01 = (n: number) => Math.min(1, Math.max(0, n))
+const fmtISO = (d: Date) => d.toISOString().slice(0, 10)
+const fmtShort = (d: Date) => `${d.getMonth()+1}/${d.getDate()}/${String(d.getFullYear()).slice(-2)}`
 const addDays = (d: Date, days: number) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + days)
 
 const parseDate = (s: string): Date | null => {
@@ -54,14 +58,7 @@ const parseCommaDates = (value: string): Date[] =>
     .filter((d): d is Date => !!d)
     .sort((a, b) => a.getTime() - b.getTime())
 
-/** Sunday-start helpers */
 const startOfWeekSunday = (d: Date) => addDays(d, -d.getDay()) // 0=Sun
-const weekIndexOfMonthSun = (d: Date) => {
-  const first = startOfWeekSunday(new Date(d.getFullYear(), d.getMonth(), 1))
-  const cur = startOfWeekSunday(d)
-  const weeks = Math.floor((cur.getTime() - first.getTime()) / dayMs / 7) + 1
-  return weeks
-}
 
 function* tickGenerator(start: Date, end: Date, g: Granularity): Generator<Date, void, unknown> {
   let cur = new Date(start)
@@ -79,27 +76,27 @@ function* tickGenerator(start: Date, end: Date, g: Granularity): Generator<Date,
   }
 }
 
-/** Your palette restored (bar gray; Due = blue) */
 const ALL_TYPES: MilestoneType[] = ['start', 'due', 'stabilization', 'complete']
 const defaultLegend: LegendSettings = {
-  barColor: '#9CA3AF', // gray-400
+  barColor: '#9CA3AF',
   milestone: {
-    start: { color: '#10b981', shape: 'circle',   size: 10 }, // green
-    due:   { color: '#3b82f6', shape: 'diamond',  size: 10 }, // blue
-    stabilization: { color: '#f59e0b', shape: 'square',   size: 10 }, // amber
-    complete:      { color: '#8b5cf6', shape: 'triangle', size: 12 }, // purple
+    start:         { color: '#10b981', shape: 'circle',   size: 12 },
+    due:           { color: '#ef4444', shape: 'diamond',  size: 12 },
+    stabilization: { color: '#3b82f6', shape: 'square',   size: 12 },
+    complete:      { color: '#111827', shape: 'triangle', size: 14 },
   },
 }
 const todayISO = () => new Date().toISOString().slice(0, 10)
 const defaultView = (): ViewState => ({
-  startDate: fmt(addDays(new Date(), -30)),
-  endDate: fmt(addDays(new Date(), 120)),
+  startDate: fmtISO(addDays(new Date(), -30)),
+  endDate: fmtISO(addDays(new Date(), 120)),
   autoRange: true,
   granularity: 'weeks',
   executiveMode: false,
   useSystemToday: true,
   manualToday: todayISO(),
   includeCompleted: true,
+  zoom: 1,
 })
 
 function load<T>(key: string, fallback: T): T {
@@ -120,17 +117,27 @@ const getProjectSpan = (p: Project) => {
 }
 
 export default function ProjectManagementApp() {
+  // theme
+  const [theme, setTheme] = useState<string>(() => load('pm_theme', 'aurora'))
+  useEffect(() => {
+    const root = document.documentElement
+    root.classList.remove('theme-earth')
+    if (theme === 'earth') root.classList.add('theme-earth')
+    save('pm_theme', theme)
+  }, [theme])
+
+  // data
   const [teams, setTeams] = useState<Team[]>(() =>
     load<Team[]>('pm_teams', [
-      { id: uid(), name: 'AppDev', members: [{ id: uid(), name: 'Ava', teamId: 'TBD' }] },
-      { id: uid(), name: 'BI',     members: [{ id: uid(), name: 'Diana', teamId: 'TBD' }] },
-      { id: uid(), name: 'Epic',   members: [{ id: uid(), name: 'Chelsea', teamId: 'TBD' }] },
+      { id: uid(), name: 'Development',  members: [{ id: uid(), name: 'Ava',     teamId: 'TBD' }] },
+      { id: uid(), name: 'QA',           members: [{ id: uid(), name: 'Diana',   teamId: 'TBD' }] },
+      { id: uid(), name: 'Infrastructure', members: [{ id: uid(), name: 'Noah',  teamId: 'TBD' }] },
     ].map(t => ({ ...t, members: t.members.map(m => ({ ...m, teamId: t.id })) })))
   )
 
   const [projects, setProjects] = useState<Project[]>(() =>
     load<Project[]>('pm_projects', [{
-      id: uid(), name: 'b3', priority: 1, teamMemberIds: [],
+      id: uid(), name: 'B3', priority: 1, teamMemberIds: [],
       startDates: '2025-05-01', dueDates: '2025-08-01, 2025-08-15',
       stabilizationDates: '', completeDates: '',
       completed: false
@@ -139,28 +146,32 @@ export default function ProjectManagementApp() {
 
   const [legend, setLegend] = useState<LegendSettings>(() => load('pm_legend', defaultLegend))
   const [views, setViews] = useState<ViewsMap>(() => load('pm_views', {}))
-  const [activeTab, setActiveTab] = useState<string>('Unified')
+  const [activeTab, setActiveTab] = useState<string>('Projects Overview')
   const [showLegend, setShowLegend] = useState(false)
 
   const ensureView = (key: string) => { if (!views[key]) setViews(v => ({ ...v, [key]: defaultView() })) }
-  useEffect(() => { ensureView('Unified') }, [])
+  useEffect(() => { ensureView('Projects Overview') }, [])
   useEffect(() => { save('pm_teams', teams) }, [teams])
   useEffect(() => { save('pm_projects', projects) }, [projects])
   useEffect(() => { save('pm_legend', legend) }, [legend])
   useEffect(() => { save('pm_views', views) }, [views])
   useEffect(() => { ensureView(activeTab) }, [activeTab])
 
-  const tabs = useMemo(() => ['Unified', 'Completed', ...teams.map(t => t.id), 'Teams', 'Projects'], [teams])
+  // tabs: Projects Overview (formerly Unified), Completed, each team, Teams Management, Projects Management
+  const tabs = useMemo(
+    () => ['Projects Overview', 'Completed', ...teams.map(t => t.id), 'Teams Management', 'Projects Management'],
+    [teams]
+  )
 
   const view = views[activeTab] ?? defaultView()
+
+  // auto-range respects filter + tab
   useEffect(() => {
     const v = views[activeTab]
     if (!v?.autoRange) return
-
     let relevant = projects
-    if (activeTab === 'Completed') {
-      relevant = relevant.filter(p => p.completed)
-    } else if (activeTab !== 'Unified' && activeTab !== 'Teams' && activeTab !== 'Projects') {
+    if (activeTab === 'Completed') relevant = relevant.filter(p => p.completed)
+    else if (activeTab !== 'Projects Overview' && activeTab !== 'Teams Management' && activeTab !== 'Projects Management') {
       const teamId = activeTab
       const memberIds = teams.find(t => t.id === teamId)?.members.map(m => m.id) ?? []
       relevant = relevant.filter(p => p.teamMemberIds.some(id => memberIds.includes(id)))
@@ -168,59 +179,70 @@ export default function ProjectManagementApp() {
     } else {
       if (!v.includeCompleted) relevant = relevant.filter(p => !p.completed)
     }
-
     const all = relevant.flatMap(getProjectAllDates)
     if (!all.length) return
     const start = addDays(all[0], -7)
     const end = addDays(all[all.length - 1], +7)
-    setViews(vs => ({ ...vs, [activeTab]: { ...vs[activeTab], startDate: fmt(start), endDate: fmt(end) } }))
+    setViews(vs => ({ ...vs, [activeTab]: { ...vs[activeTab], startDate: fmtISO(start), endDate: fmtISO(end) } }))
   }, [projects, teams, activeTab, view.includeCompleted])
 
   const renderTabLabel = (key: string) => {
-    if (key === 'Unified' || key === 'Teams' || key === 'Projects' || key === 'Completed') return key
-    return `Team – ${teams.find(t => t.id === key)?.name ?? key}`
+    if (key === 'Projects Overview' || key === 'Completed' || key === 'Teams Management' || key === 'Projects Management') return key
+    return teams.find(t => t.id === key)?.name ?? key
   }
 
   return (
-    <div className="mx-auto max-w-[1400px] p-4">
-      <header className="mb-4 flex items-center justify-between gap-3">
-        <h1 className="text-2xl font-bold">PIRA Project Timeline</h1>
-        <button className="pm-outline" onClick={() => setShowLegend(true)}>Legend Settings</button>
-      </header>
+    <div className="mx-auto max-w-[1400px]">
+      {/* Banner */}
+      <div className="banner px-6 py-6">
+        <h1>PIRA</h1>
+        <p>Project IT Resource Availability</p>
+      </div>
 
-      <nav className="mb-3 flex flex-wrap gap-2">
+      {/* Tabs */}
+      <div className="mt-4 flex flex-wrap gap-3 px-4">
         {tabs.map(key => (
           <button key={key} onClick={() => setActiveTab(key)}
-            className={"pm-outline " + (activeTab === key ? "border-slate-900" : "")}
+            className={activeTab === key ? 'tab-active' : 'tab'}
             title={renderTabLabel(key)}>
             {renderTabLabel(key)}
           </button>
         ))}
-      </nav>
+      </div>
 
-      <PanelControls
-        view={view}
-        onChange={next => setViews(v => ({ ...v, [activeTab]: { ...v[activeTab], ...next } }))}
-        showCompletedToggle={activeTab !== 'Completed'}
-      />
+      {/* Controls row */}
+      <div className="mt-4 flex flex-wrap items-center gap-3 px-4">
+        <button className="pm-outline" onClick={() => setShowLegend(true)}>Legend Settings</button>
+        <button className="pm-outline" onClick={() => setTheme(t => t === 'earth' ? 'aurora' : 'earth')}>
+          Theme: {theme === 'earth' ? 'Earthy Pastel' : 'Blue/Purple'}
+        </button>
+      </div>
 
-      <div className="mt-4">
-        {activeTab === 'Projects' && (
+      <div className="px-4 mt-4">
+        <PanelControls
+          view={view}
+          onChange={next => setViews(v => ({ ...v, [activeTab]: { ...v[activeTab], ...next } }))}
+          showCompletedToggle={activeTab !== 'Completed'}
+        />
+      </div>
+
+      <div className="mt-4 px-4 pb-6">
+        {activeTab === 'Projects Management' && (
           <ProjectsManager teams={teams} projects={projects} setProjects={setProjects} />
         )}
-        {activeTab === 'Teams' && (
+        {activeTab === 'Teams Management' && (
           <TeamsManager teams={teams} setTeams={setTeams} executive={view.executiveMode} />
         )}
-        {(activeTab === 'Unified' || activeTab === 'Completed' || (activeTab !== 'Teams' && activeTab !== 'Projects')) && (
-          <TimelineView
+        {(activeTab === 'Projects Overview' || activeTab === 'Completed' ||
+          (activeTab !== 'Teams Management' && activeTab !== 'Projects Management')) && (
+          <TimelineAndRoster
             key={'tl-' + activeTab}
             tabKey={activeTab}
             teams={teams}
             projects={projects}
             legend={legend}
             view={view}
-            executive={view.executiveMode}
-            openLegend={() => setShowLegend(true)}
+            setView={(p)=>setViews(v=>({...v,[activeTab]:{...v[activeTab],...p}}))}
           />
         )}
       </div>
@@ -235,7 +257,7 @@ function PanelControls({
 }: { view: ViewState, onChange: (partial: Partial<ViewState>) => void, showCompletedToggle: boolean }) {
   return (
     <div className="rounded-xl border bg-white p-3 shadow-sm">
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
         <div className="flex items-center gap-2">
           <label className="badge">Granularity</label>
           <select value={view.granularity} onChange={e => onChange({ granularity: e.target.value as Granularity })}>
@@ -248,12 +270,17 @@ function PanelControls({
         <div className="flex items-center gap-2">
           <label className="badge">Auto Range</label>
           <input type="checkbox" checked={view.autoRange} onChange={e => onChange({ autoRange: e.target.checked })} />
-          <span className="text-sm text-slate-500">Start/End follow project dates</span>
         </div>
         <div className="flex items-center gap-2">
           <label className="badge">Executive Mode</label>
           <input type="checkbox" checked={view.executiveMode} onChange={e => onChange({ executiveMode: e.target.checked })} />
-          <span className="text-sm text-slate-500">Hide names</span>
+          <span className="text-sm text-slate-500">Hide names on team tabs</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="badge">Zoom</label>
+          <input type="range" min={0.5} max={2} step={0.1} value={view.zoom}
+                 onChange={e => onChange({ zoom: parseFloat(e.target.value) })}/>
+          <span className="text-sm w-12 text-right">{Math.round(view.zoom * 100)}%</span>
         </div>
       </div>
 
@@ -279,11 +306,8 @@ function PanelControls({
       {showCompletedToggle && (
         <div className="mt-3">
           <label className="badge mr-2">Show completed</label>
-          <input
-            type="checkbox"
-            checked={view.includeCompleted}
-            onChange={e => onChange({ includeCompleted: e.target.checked })}
-          />
+          <input type="checkbox" checked={view.includeCompleted}
+                 onChange={e => onChange({ includeCompleted: e.target.checked })}/>
           <span className="ml-2 text-sm text-slate-500">Off = hide completed; On = show all</span>
         </div>
       )}
@@ -291,7 +315,7 @@ function PanelControls({
   )
 }
 
-/** Editable modal lives behind the top-right button ONLY */
+/* Modal editor for legend */
 function LegendModal({ legend, setLegend, onClose }:
   { legend: LegendSettings, setLegend: (l: LegendSettings) => void, onClose: () => void }) {
   const update = (k: MilestoneType, field: 'color' | 'shape' | 'size', value: string) => {
@@ -299,7 +323,7 @@ function LegendModal({ legend, setLegend, onClose }:
       ...legend,
       milestone: {
         ...legend.milestone,
-        [k]: { ...legend.milestone[k], [field]: field === 'size' ? Math.max(6, Math.min(24, parseInt(value || '10', 10))) : value }
+        [k]: { ...legend.milestone[k], [field]: field === 'size' ? Math.max(6, Math.min(24, parseInt(value || '12', 10))) : value }
       }
     })
   }
@@ -341,64 +365,7 @@ function LegendModal({ legend, setLegend, onClose }:
   )
 }
 
-function TeamsManager({ teams, setTeams, executive }:
-  { teams: Team[], setTeams: React.Dispatch<React.SetStateAction<Team[]>>, executive: boolean }) {
-  const addTeam = () => { const name = prompt('Team name?'); if (name) setTeams(ts => [...ts, { id: uid(), name, members: [] }]) }
-  const renameTeam = (id: string) => {
-    const t = teams.find(t => t.id === id); if (!t) return
-    const name = prompt('New team name', t.name); if (name) setTeams(ts => ts.map(x => x.id === id ? { ...x, name } : x))
-  }
-  const addMember = (teamId: string) => {
-    const name = prompt('Member name?'); if (!name) return
-    setTeams(ts => ts.map(t => t.id === teamId ? { ...t, members: [...t.members, { id: uid(), name, teamId }] } : t))
-  }
-  const renameMember = (teamId: string, memberId: string) => {
-    const team = teams.find(t => t.id === teamId); const m = team?.members.find(m => m.id === memberId); if (!m) return
-    const name = prompt('New member name', m.name); if (name)
-      setTeams(ts => ts.map(t => t.id === teamId ? { ...t, members: t.members.map(mm => mm.id === memberId ? { ...mm, name } : mm) } : t))
-  }
-  const removeMember = (teamId: string, memberId: string) =>
-    setTeams(ts => ts.map(t => t.id === teamId ? { ...t, members: t.members.filter(mm => mm.id !== memberId) } : t))
-  const removeTeam = (id: string) => { if (confirm('Delete team (and its members)?')) setTeams(ts => ts.filter(t => t.id !== id)) }
-
-  return (
-    <div className="rounded-xl border bg-white p-4 shadow-sm">
-      <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Teams</h2>
-        <button className="pm" onClick={addTeam}>Add Team</button>
-      </div>
-      <div className="grid gap-4">
-        {teams.map((t) => (
-          <div key={t.id} className="rounded-lg border p-3">
-            <div className="mb-2 flex items-center justify-between">
-              <div className="font-medium">
-                {t.name} <span className="text-xs text-slate-500">(Members: {t.members.length})</span>
-              </div>
-              <div className="flex gap-2">
-                <button className="pm-outline" onClick={() => renameTeam(t.id)}>✏️ Rename</button>
-                <button className="pm-outline" onClick={() => addMember(t.id)}>＋ Add Member</button>
-                <button className="pm-outline" onClick={() => removeTeam(t.id)}>🗑 Delete</button>
-              </div>
-            </div>
-            <ul className="space-y-1">
-              {t.members.map((m, i) => (
-                <li key={m.id} className="flex items-center justify-between">
-                  <span>{executive ? `Resource ${i + 1}` : m.name}</span>
-                  <span className="flex gap-2">
-                    <button className="pm-outline" onClick={() => renameMember(t.id, m.id)}>✏️</button>
-                    <button className="pm-outline" onClick={() => removeMember(t.id, m.id)}>🗑</button>
-                  </span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-/** Projects table — removed the extra legend at the bottom */
+/** Projects editor table */
 function ProjectsManager({ teams, projects, setProjects }:
   { teams: Team[], projects: Project[], setProjects: React.Dispatch<React.SetStateAction<Project[]>> }) {
   const allMembers = teams.flatMap(t => t.members)
@@ -412,7 +379,7 @@ function ProjectsManager({ teams, projects, setProjects }:
   return (
     <div className="rounded-xl border bg-white p-4 shadow-sm">
       <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Projects</h2>
+        <h2 className="text-lg font-semibold">Projects Management</h2>
         <button className="pm-outline" onClick={addProject}>＋ Add Project</button>
       </div>
 
@@ -439,7 +406,7 @@ function ProjectsManager({ teams, projects, setProjects }:
                 <td className="border px-2 py-1 w-24">
                   <input type="checkbox" checked={p.completed} onChange={e => update(p.id, { completed: e.target.checked })} />
                 </td>
-                <td className="border px-2 py-1 min-w-[240px]">
+                <td className="border px-2 py-1 min-w-[260px]">
                   <SelectMany
                     options={allMembers.map(m => ({ id: m.id, label: `${teams.find(t => t.id === m.teamId)?.name ?? ''} - ${m.name}` }))}
                     value={p.teamMemberIds}
@@ -485,7 +452,7 @@ function SelectMany({ options, value, onChange }:
   )
 }
 
-/** Read-only glyph used in the timeline legend strip */
+/** Read-only legend strip */
 function Glyph({ color, shape, size }:{ color:string, shape:Shape, size:number }) {
   const sz = size
   if (shape === 'circle') return <div style={{ width: sz, height: sz, borderRadius: 9999, background: color }} />
@@ -501,7 +468,6 @@ function Glyph({ color, shape, size }:{ color:string, shape:Shape, size:number }
     </svg>
   )
 }
-
 function LegendReadOnly({ legend }: { legend: LegendSettings }) {
   return (
     <div className="flex flex-wrap items-center gap-4 py-2 text-sm">
@@ -519,22 +485,22 @@ function LegendReadOnly({ legend }: { legend: LegendSettings }) {
   )
 }
 
-/** Timeline with sticky name column + horizontal scroll + Sunday weeks */
-function TimelineView({
-  tabKey, teams, projects, legend, view, executive, openLegend
+/** Roster + Timeline + PDF + Zoom */
+function TimelineAndRoster({
+  tabKey, teams, projects, legend, view, setView
 }: {
   tabKey: string
   teams: Team[]
   projects: Project[]
   legend: LegendSettings
   view: ViewState
-  executive: boolean
-  openLegend: () => void
+  setView: (partial: Partial<ViewState>) => void
 }) {
+  // filter by tab
   let list = projects
-  if (tabKey === 'Completed') {
-    list = list.filter(p => p.completed)
-  } else if (tabKey !== 'Unified' && tabKey !== 'Teams' && tabKey !== 'Projects') {
+  const teamMode = (tabKey !== 'Projects Overview' && tabKey !== 'Teams Management' && tabKey !== 'Projects Management' && tabKey !== 'Completed')
+  if (tabKey === 'Completed') list = list.filter(p => p.completed)
+  else if (teamMode) {
     const teamId = tabKey
     const memberIds = teams.find(t => t.id === teamId)?.members.map(m => m.id) ?? []
     list = list.filter(p => p.teamMemberIds.some(id => memberIds.includes(id)))
@@ -543,15 +509,27 @@ function TimelineView({
     if (!view.includeCompleted) list = list.filter(p => !p.completed)
   }
 
+  // roster for team tabs
+  const roster = useMemo(() => {
+    if (!teamMode) return []
+    const t = teams.find(tt => tt.id === tabKey)
+    const mems = t?.members ?? []
+    return mems.map((m, i) => {
+      const assigned = list.filter(p => p.teamMemberIds.includes(m.id)).map(p => p.name)
+      return { member: m, label: view.executiveMode ? `Resource ${i+1}` : m.name, projects: assigned }
+    })
+  }, [teamMode, teams, tabKey, list, view.executiveMode])
+
+  // timeline geometry
   const start = parseDate(view.startDate) ?? new Date()
   const end = parseDate(view.endDate) ?? addDays(start, 120)
   const daysTotal = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / dayMs))
-  const PX_PER_DAY = 12
-  const contentWidth = Math.max(600, daysTotal * PX_PER_DAY)
+  const PX_PER_DAY_BASE = 10
+  const PX_PER_DAY = PX_PER_DAY_BASE * view.zoom
+  const contentWidth = Math.max(600, Math.ceil(daysTotal * PX_PER_DAY))
   const today = view.useSystemToday ? new Date() : (parseDate(view.manualToday) ?? new Date())
 
-  const xPx = (d: Date) => clamp((d.getTime() - start.getTime()) / (daysTotal * dayMs), 0, 1) * contentWidth
-
+  const xPx = (d: Date) => clamp01((d.getTime() - start.getTime()) / (daysTotal * dayMs)) * contentWidth
   const ticks = Array.from(tickGenerator(start, end, view.granularity))
 
   const rows = list
@@ -567,54 +545,106 @@ function TimelineView({
     })
     .filter(r => r.span.start && r.span.end)
 
-  const NAME_COL_WIDTH = 220
+  const NAME_COL_WIDTH = 260
+
+  // PDF export
+  const gridRef = useRef<HTMLDivElement>(null)
+  const handleExportPDF = async () => {
+    if (!gridRef.current) return
+    const node = gridRef.current
+    const canvas = await html2canvas(node, { scale: 2, useCORS: true, backgroundColor: '#ffffff' })
+    const imgData = canvas.toDataURL('image/png')
+
+    // Letter Landscape in points (pt): 792h x 612w, but jsPDF expects [w,h]
+    const pdf = new jsPDF({ orientation: 'landscape', unit: 'pt', format: 'letter' })
+    const pageWidth = pdf.internal.pageSize.getWidth()
+    const pageHeight = pdf.internal.pageSize.getHeight()
+
+    const imgWidth = pageWidth
+    const imgHeight = canvas.height * (imgWidth / canvas.width)
+
+    let y = 0
+    while (y < imgHeight) {
+      pdf.addImage(imgData, 'PNG', 0, -y, imgWidth, imgHeight)
+      y += pageHeight
+      if (y < imgHeight) pdf.addPage()
+    }
+    pdf.save('timeline.pdf')
+  }
 
   return (
     <div className="rounded-xl border bg-white p-4 shadow-sm">
       <div className="mb-3 flex items-center justify-between">
         <div className="text-sm text-slate-600">
-          Range: <span className="font-medium">{fmt(start)}</span> → <span className="font-medium">{fmt(end)}</span> •{' '}
+          Range: <span className="font-medium">{fmtShort(start)}</span> → <span className="font-medium">{fmtShort(end)}</span> •{' '}
           Granularity: <span className="font-medium capitalize">{view.granularity}</span>
         </div>
-        <button className="pm-outline" onClick={openLegend}>Legend Settings</button>
+        <div className="flex items-center gap-2">
+          <button className="pm-outline" onClick={handleExportPDF}>Download PDF</button>
+        </div>
       </div>
 
-      {/* read-only legend that mirrors current palette */}
       <LegendReadOnly legend={legend} />
 
-      <div className="grid" style={{ gridTemplateColumns: `${NAME_COL_WIDTH}px 1fr` }}>
-        {/* left sticky names */}
+      {/* Team roster (only on team tabs) */}
+      {teamMode && (
+        <div className="mb-4 rounded-lg border p-3">
+          <div className="font-medium mb-2">Assignments</div>
+          <div className="overflow-x-auto">
+            <table className="min-w-[600px] text-sm w-full">
+              <thead className="bg-slate-100">
+                <tr>
+                  <th className="border px-2 py-1 text-left w-56">Member</th>
+                  <th className="border px-2 py-1 text-left">Projects</th>
+                </tr>
+              </thead>
+              <tbody>
+                {roster.map((r) => (
+                  <tr key={r.member.id} className="odd:bg-white even:bg-slate-50">
+                    <td className="border px-2 py-1">{r.label}</td>
+                    <td className="border px-2 py-1">{r.projects.join(', ') || ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Timeline */}
+      <div ref={gridRef} className="grid" style={{ gridTemplateColumns: `${NAME_COL_WIDTH}px 1fr` }}>
+        {/* Names */}
         <div className="sticky left-0 z-10 bg-white border-r border-slate-200">
           <div className="h-10 border-b border-slate-200 bg-slate-100" />
           {rows.map((r, idx) => (
             <div key={'name-' + r.project.id} className="tl-name-cell">
-              {executive ? `Project ${idx + 1}` : `${r.project.priority}. ${r.project.name}`}
+              {`${r.project.priority}. ${r.project.name}`}
             </div>
           ))}
         </div>
 
-        {/* right scrollable timeline */}
+        {/* Scrollable time pane */}
         <div className="tl-scroll">
-          {/* time scale */}
+          {/* scale */}
           <div className="tl-scale" style={{ width: contentWidth }}>
             {ticks.map((t, i) => (
               <div key={i}
                    className="absolute top-0 h-full border-l border-slate-300 text-[10px] text-slate-700"
                    style={{ left: xPx(t) }}>
                 <div className="absolute -top-1 -translate-x-1/2 whitespace-nowrap px-1">
-                  {labelForTick(t, view.granularity)}
+                  {view.granularity === 'weeks' ? fmtShort(t) : fmtShort(t)}
                 </div>
               </div>
             ))}
             {/* today */}
-            <div className="absolute inset-y-0 w-px bg-rose-500" style={{ left: xPx(today) }} title={"Today: " + fmt(today)} />
+            <div className="absolute inset-y-0 w-px bg-rose-500" style={{ left: xPx(view.useSystemToday ? new Date() : (parseDate(view.manualToday) ?? new Date())) }} title={"Today"} />
           </div>
 
           {/* rows */}
-          <div className="relative" style={{ width: contentWidth }}>
+          <div className="relative" style={{ width: contentWidth, paddingBottom: 6 }}>
             {rows.map((r) => (
               <div key={r.project.id} className="tl-row">
-                {/* project bar */}
+                {/* bar */}
                 <div
                   className="absolute top-1/2 -translate-y-1/2 h-2.5 rounded-full"
                   style={{
@@ -623,14 +653,20 @@ function TimelineView({
                     background: legend.barColor,
                     zIndex: 1
                   }}
-                  title={`${r.project.name}: ${fmt(r.span.start!)} → ${fmt(r.span.end!)}`}
+                  title={`${r.project.name}: ${fmtShort(r.span.start!)} → ${fmtShort(r.span.end!)}`}
                 />
-                {/* milestones (every entry, no collapsing) */}
-                {ALL_TYPES.map((mt) =>
-                  r.datesByType[mt].map((d, i) => (
-                    <Milestone key={r.project.id + mt + i + d.toISOString()} x={xPx(d)} type={mt} legend={legend} date={d} />
-                  ))
-                )}
+                {/* milestones with small offsets if same x */}
+                {ALL_TYPES.map((mt) => {
+                  const arr = r.datesByType[mt]
+                  return arr.map((d, i) => {
+                    const base = xPx(d)
+                    const offset = i * (legend.milestone[mt].size + 2) * 0.6
+                    return (
+                      <Milestone key={r.project.id + mt + i + d.toISOString()}
+                                 x={base + offset} type={mt} legend={legend} date={d} />
+                    )
+                  })
+                })}
               </div>
             ))}
           </div>
@@ -644,29 +680,19 @@ function TimelineView({
   )
 }
 
-function labelForTick(d: Date, g: Granularity) {
-  if (g === 'weeks') {
-    const wk = weekIndexOfMonthSun(d)
-    return `${d.getFullYear()}-${(d.getMonth()+1).toString().padStart(2,'0')} W${wk}`
-  }
-  if (g === 'months') return `${d.getFullYear()}-${(d.getMonth()+1).toString().padStart(2,'0')}`
-  if (g === 'quarters') return `Q${Math.floor(d.getMonth()/3)+1} ${d.getFullYear()}`
-  return `${d.getFullYear()}`
-}
-
 function Milestone({ x, type, legend, date }:
   { x: number, type: MilestoneType, legend: LegendSettings, date: Date }) {
   const sz = legend.milestone[type].size
   const fill = legend.milestone[type].color
   const shape = legend.milestone[type].shape
-  const title = `${type.toUpperCase()} • ${date.toISOString().slice(0,10)}`
+  const title = `${type.toUpperCase()} • ${fmtShort(date)}`
   const style: React.CSSProperties = {
     position: 'absolute', left: x, top: '50%', transform: 'translate(-50%, -50%)',
     zIndex: 2
   }
   return (
     <div style={style} title={title} aria-label={title}>
-      {shape === 'circle'   && <div style={{ width: sz, height: sz, borderRadius: '9999px', background: fill }} />}
+      {shape === 'circle'   && <div style={{ width: sz, height: sz, borderRadius: 9999, background: fill }} />}
       {shape === 'square'   && <div style={{ width: sz, height: sz, background: fill }} />}
       {shape === 'diamond'  && (
         <svg width={sz} height={sz} viewBox="0 0 100 100" aria-hidden>
