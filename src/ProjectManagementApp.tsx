@@ -37,30 +37,38 @@ type ViewState = {
 type ViewsMap = Record<string, ViewState>
 
 const uid = () => Math.random().toString(36).slice(2, 10)
-const clamp = (n: number, min = 0, max = 100) => Math.min(max, Math.max(min, n))
+const dayMs = 24 * 60 * 60 * 1000
+const clamp = (n: number, min = 0, max = 1) => Math.min(max, Math.max(min, n))
 const fmt = (d: Date) => d.toISOString().slice(0, 10)
-const addDays = (d: Date, days: number) => { const x = new Date(d); x.setDate(x.getDate() + days); return x }
+const addDays = (d: Date, days: number) => new Date(d.getFullYear(), d.getMonth(), d.getDate() + days)
 
 const parseDate = (s: string): Date | null => {
-  const t = s.trim(); if (!t) return null
+  const t = (s ?? '').trim(); if (!t) return null
   const d = new Date(t); if (isNaN(d.getTime())) return null
   return new Date(d.getFullYear(), d.getMonth(), d.getDate())
 }
 const parseCommaDates = (value: string): Date[] =>
-  value.split(',')
-       .map(parseDate)
-       .filter((d): d is Date => !!d)
-       .sort((a, b) => a.getTime() - b.getTime())
+  (value || '')
+    .split(',')
+    .map(s => parseDate(s || ''))
+    .filter((d): d is Date => !!d)
+    .sort((a, b) => a.getTime() - b.getTime())
+
+/** Sunday-start helpers */
+const startOfWeekSunday = (d: Date) => addDays(d, -d.getDay()) // 0=Sun
+const weekIndexOfMonthSun = (d: Date) => {
+  const first = startOfWeekSunday(new Date(d.getFullYear(), d.getMonth(), 1))
+  const cur = startOfWeekSunday(d)
+  const weeks = Math.floor((cur.getTime() - first.getTime()) / dayMs / 7) + 1
+  return weeks
+}
 
 function* tickGenerator(start: Date, end: Date, g: Granularity): Generator<Date, void, unknown> {
-  const startOfMonth = (d: Date) => new Date(d.getFullYear(), d.getMonth(), 1)
-  const startOfQuarter = (d: Date) => new Date(d.getFullYear(), Math.floor(d.getMonth() / 3) * 3, 1)
-  const startOfYear = (d: Date) => new Date(d.getFullYear(), 0, 1)
-
   let cur = new Date(start)
-  if (g === 'months') cur = startOfMonth(cur)
-  if (g === 'quarters') cur = startOfQuarter(cur)
-  if (g === 'years') cur = startOfYear(cur)
+  if (g === 'weeks') cur = startOfWeekSunday(cur)
+  if (g === 'months') cur = new Date(cur.getFullYear(), cur.getMonth(), 1)
+  if (g === 'quarters') cur = new Date(cur.getFullYear(), Math.floor(cur.getMonth() / 3) * 3, 1)
+  if (g === 'years') cur = new Date(cur.getFullYear(), 0, 1)
 
   while (cur <= end) {
     yield new Date(cur)
@@ -71,22 +79,23 @@ function* tickGenerator(start: Date, end: Date, g: Granularity): Generator<Date,
   }
 }
 
+/** Your palette restored (bar gray; Due = blue) */
 const ALL_TYPES: MilestoneType[] = ['start', 'due', 'stabilization', 'complete']
 const defaultLegend: LegendSettings = {
-  barColor: '#0ea5e9',
+  barColor: '#9CA3AF', // gray-400
   milestone: {
-    start: { color: '#10b981', shape: 'circle', size: 10 },
-    due: { color: '#ef4444', shape: 'diamond', size: 10 },
-    stabilization: { color: '#f59e0b', shape: 'square', size: 10 },
-    complete: { color: '#6366f1', shape: 'triangle', size: 12 },
+    start: { color: '#10b981', shape: 'circle',   size: 10 }, // green
+    due:   { color: '#3b82f6', shape: 'diamond',  size: 10 }, // blue
+    stabilization: { color: '#f59e0b', shape: 'square',   size: 10 }, // amber
+    complete:      { color: '#8b5cf6', shape: 'triangle', size: 12 }, // purple
   },
 }
 const todayISO = () => new Date().toISOString().slice(0, 10)
 const defaultView = (): ViewState => ({
   startDate: fmt(addDays(new Date(), -30)),
-  endDate: fmt(addDays(new Date(), 90)),
+  endDate: fmt(addDays(new Date(), 120)),
   autoRange: true,
-  granularity: 'months',
+  granularity: 'weeks',
   executiveMode: false,
   useSystemToday: true,
   manualToday: todayISO(),
@@ -94,8 +103,7 @@ const defaultView = (): ViewState => ({
 })
 
 function load<T>(key: string, fallback: T): T {
-  try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) as T : fallback }
-  catch { return fallback }
+  try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) as T : fallback } catch { return fallback }
 }
 function save<T>(key: string, value: T) { try { localStorage.setItem(key, JSON.stringify(value)) } catch {} }
 
@@ -115,15 +123,16 @@ export default function ProjectManagementApp() {
   const [teams, setTeams] = useState<Team[]>(() =>
     load<Team[]>('pm_teams', [
       { id: uid(), name: 'AppDev', members: [{ id: uid(), name: 'Ava', teamId: 'TBD' }] },
-      { id: uid(), name: 'Infra', members: [{ id: uid(), name: 'Noah', teamId: 'TBD' }] },
+      { id: uid(), name: 'BI',     members: [{ id: uid(), name: 'Diana', teamId: 'TBD' }] },
+      { id: uid(), name: 'Epic',   members: [{ id: uid(), name: 'Chelsea', teamId: 'TBD' }] },
     ].map(t => ({ ...t, members: t.members.map(m => ({ ...m, teamId: t.id })) })))
   )
 
   const [projects, setProjects] = useState<Project[]>(() =>
     load<Project[]>('pm_projects', [{
-      id: uid(), name: 'Unified Auth', priority: 1, teamMemberIds: [],
-      startDates: '2025-01-10', dueDates: '2025-02-15',
-      stabilizationDates: '2025-03-01', completeDates: '',
+      id: uid(), name: 'b3', priority: 1, teamMemberIds: [],
+      startDates: '2025-05-01', dueDates: '2025-08-01, 2025-08-15',
+      stabilizationDates: '', completeDates: '',
       completed: false
     }])
   )
@@ -173,10 +182,10 @@ export default function ProjectManagementApp() {
   }
 
   return (
-    <div className="mx-auto max-w-[1200px] p-4">
+    <div className="mx-auto max-w-[1400px] p-4">
       <header className="mb-4 flex items-center justify-between gap-3">
         <h1 className="text-2xl font-bold">PIRA Project Timeline</h1>
-        <button className="pm-outline" onClick={() => setShowLegend(true)}>Legend</button>
+        <button className="pm-outline" onClick={() => setShowLegend(true)}>Legend Settings</button>
       </header>
 
       <nav className="mb-3 flex flex-wrap gap-2">
@@ -197,7 +206,7 @@ export default function ProjectManagementApp() {
 
       <div className="mt-4">
         {activeTab === 'Projects' && (
-          <ProjectsManager teams={teams} projects={projects} setProjects={setProjects} legend={legend} />
+          <ProjectsManager teams={teams} projects={projects} setProjects={setProjects} />
         )}
         {activeTab === 'Teams' && (
           <TeamsManager teams={teams} setTeams={setTeams} executive={view.executiveMode} />
@@ -210,7 +219,6 @@ export default function ProjectManagementApp() {
             projects={projects}
             legend={legend}
             view={view}
-            setView={() => {}}
             executive={view.executiveMode}
             openLegend={() => setShowLegend(true)}
           />
@@ -283,6 +291,7 @@ function PanelControls({
   )
 }
 
+/** Editable modal lives behind the top-right button ONLY */
 function LegendModal({ legend, setLegend, onClose }:
   { legend: LegendSettings, setLegend: (l: LegendSettings) => void, onClose: () => void }) {
   const update = (k: MilestoneType, field: 'color' | 'shape' | 'size', value: string) => {
@@ -389,8 +398,9 @@ function TeamsManager({ teams, setTeams, executive }:
   )
 }
 
-function ProjectsManager({ teams, projects, setProjects, legend }:
-  { teams: Team[], projects: Project[], setProjects: React.Dispatch<React.SetStateAction<Project[]>>, legend: LegendSettings }) {
+/** Projects table — removed the extra legend at the bottom */
+function ProjectsManager({ teams, projects, setProjects }:
+  { teams: Team[], projects: Project[], setProjects: React.Dispatch<React.SetStateAction<Project[]>> }) {
   const allMembers = teams.flatMap(t => t.members)
   const addProject = () => setProjects(ps => [...ps, {
     id: uid(), name: 'New Project', priority: (ps[ps.length - 1]?.priority ?? 0) + 1,
@@ -456,15 +466,6 @@ function ProjectsManager({ teams, projects, setProjects, legend }:
           </tbody>
         </table>
       </div>
-
-      <div className="mt-3 text-sm text-slate-500">
-        Tip: Enter comma-separated dates (e.g., <code>2025-01-10, 2025-02-15</code>). Invalid entries are ignored.
-      </div>
-
-      <div className="mt-4 rounded-lg border p-3">
-        <div className="mb-2 font-medium">Legend (applies everywhere)</div>
-        <LegendInline legend={legend} />
-      </div>
     </div>
   )
 }
@@ -484,15 +485,49 @@ function SelectMany({ options, value, onChange }:
   )
 }
 
+/** Read-only glyph used in the timeline legend strip */
+function Glyph({ color, shape, size }:{ color:string, shape:Shape, size:number }) {
+  const sz = size
+  if (shape === 'circle') return <div style={{ width: sz, height: sz, borderRadius: 9999, background: color }} />
+  if (shape === 'square') return <div style={{ width: sz, height: sz, background: color }} />
+  if (shape === 'diamond') return (
+    <svg width={sz} height={sz} viewBox="0 0 100 100" aria-hidden>
+      <polygon points="50,0 100,50 50,100 0,50" fill={color} />
+    </svg>
+  )
+  return (
+    <svg width={sz} height={sz} viewBox="0 0 100 100" aria-hidden>
+      <polygon points="50,0 100,100 0,100" fill={color} />
+    </svg>
+  )
+}
+
+function LegendReadOnly({ legend }: { legend: LegendSettings }) {
+  return (
+    <div className="flex flex-wrap items-center gap-4 py-2 text-sm">
+      <div className="flex items-center gap-2">
+        <span className="w-10 h-2 rounded-full" style={{ background: legend.barColor }}></span>
+        <span>Project bar</span>
+      </div>
+      {ALL_TYPES.map(mt => (
+        <div key={mt} className="flex items-center gap-2">
+          <Glyph color={legend.milestone[mt].color} shape={legend.milestone[mt].shape} size={legend.milestone[mt].size} />
+          <span className="capitalize">{mt}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+/** Timeline with sticky name column + horizontal scroll + Sunday weeks */
 function TimelineView({
-  tabKey, teams, projects, legend, view, setView, executive, openLegend
+  tabKey, teams, projects, legend, view, executive, openLegend
 }: {
   tabKey: string
   teams: Team[]
   projects: Project[]
   legend: LegendSettings
   view: ViewState
-  setView: (partial: Partial<ViewState>) => void
   executive: boolean
   openLegend: () => void
 }) {
@@ -509,12 +544,15 @@ function TimelineView({
   }
 
   const start = parseDate(view.startDate) ?? new Date()
-  const end = parseDate(view.endDate) ?? addDays(start, 90)
-  const spanMs = Math.max(1, end.getTime() - start.getTime())
+  const end = parseDate(view.endDate) ?? addDays(start, 120)
+  const daysTotal = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / dayMs))
+  const PX_PER_DAY = 12
+  const contentWidth = Math.max(600, daysTotal * PX_PER_DAY)
   const today = view.useSystemToday ? new Date() : (parseDate(view.manualToday) ?? new Date())
 
+  const xPx = (d: Date) => clamp((d.getTime() - start.getTime()) / (daysTotal * dayMs), 0, 1) * contentWidth
+
   const ticks = Array.from(tickGenerator(start, end, view.granularity))
-  const pos = (d: Date) => clamp(((d.getTime() - start.getTime()) / spanMs) * 100)
 
   const rows = list
     .map(p => {
@@ -529,6 +567,8 @@ function TimelineView({
     })
     .filter(r => r.span.start && r.span.end)
 
+  const NAME_COL_WIDTH = 220
+
   return (
     <div className="rounded-xl border bg-white p-4 shadow-sm">
       <div className="mb-3 flex items-center justify-between">
@@ -536,43 +576,64 @@ function TimelineView({
           Range: <span className="font-medium">{fmt(start)}</span> → <span className="font-medium">{fmt(end)}</span> •{' '}
           Granularity: <span className="font-medium capitalize">{view.granularity}</span>
         </div>
-        <button className="pm-outline" onClick={openLegend}>Legend</button>
+        <button className="pm-outline" onClick={openLegend}>Legend Settings</button>
       </div>
 
-      <div className="relative overflow-hidden rounded-lg border">
-        <div className="relative h-10 bg-slate-100">
-          {ticks.map((t, i) => (
-            <div key={i} className="absolute top-0 h-full border-l border-slate-300 text-[10px] text-slate-700" style={{ left: pos(t) + '%' }}>
-              <div className="absolute -top-1 -translate-x-1/2 whitespace-nowrap px-1">
-                {labelForTick(t, view.granularity)}
-              </div>
+      {/* read-only legend that mirrors current palette */}
+      <LegendReadOnly legend={legend} />
+
+      <div className="grid" style={{ gridTemplateColumns: `${NAME_COL_WIDTH}px 1fr` }}>
+        {/* left sticky names */}
+        <div className="sticky left-0 z-10 bg-white border-r border-slate-200">
+          <div className="h-10 border-b border-slate-200 bg-slate-100" />
+          {rows.map((r, idx) => (
+            <div key={'name-' + r.project.id} className="tl-name-cell">
+              {executive ? `Project ${idx + 1}` : `${r.project.priority}. ${r.project.name}`}
             </div>
           ))}
-          <div className="absolute inset-y-0 w-px bg-rose-500" style={{ left: pos(today) + '%' }} title={"Today: " + fmt(today)}></div>
         </div>
 
-        <div className="divide-y">
-          {rows.map((r, idx) => (
-            <div key={r.project.id} className="relative h-16">
-              <div
-                className="absolute top-1/2 -translate-y-1/2 h-3 rounded-full"
-                style={{
-                  left: pos(r.span.start!) + '%',
-                  width: (pos(r.span.end!) - pos(r.span.start!)) + '%',
-                  background: legend.barColor
-                }}
-                title={`${r.project.name}: ${fmt(r.span.start!)} → ${fmt(r.span.end!)}`}
-              />
-              {ALL_TYPES.map((mt) =>
-                r.datesByType[mt].map((d, i) => (
-                  <Milestone key={mt + i + d.toISOString()} x={pos(d)} type={mt} legend={legend} date={d} />
-                ))
-              )}
-              <div className="absolute left-2 top-1 text-sm font-medium">
-                {executive ? `Project ${idx + 1}` : `${r.project.priority}. ${r.project.name}`}
+        {/* right scrollable timeline */}
+        <div className="tl-scroll">
+          {/* time scale */}
+          <div className="tl-scale" style={{ width: contentWidth }}>
+            {ticks.map((t, i) => (
+              <div key={i}
+                   className="absolute top-0 h-full border-l border-slate-300 text-[10px] text-slate-700"
+                   style={{ left: xPx(t) }}>
+                <div className="absolute -top-1 -translate-x-1/2 whitespace-nowrap px-1">
+                  {labelForTick(t, view.granularity)}
+                </div>
               </div>
-            </div>
-          ))}
+            ))}
+            {/* today */}
+            <div className="absolute inset-y-0 w-px bg-rose-500" style={{ left: xPx(today) }} title={"Today: " + fmt(today)} />
+          </div>
+
+          {/* rows */}
+          <div className="relative" style={{ width: contentWidth }}>
+            {rows.map((r) => (
+              <div key={r.project.id} className="tl-row">
+                {/* project bar */}
+                <div
+                  className="absolute top-1/2 -translate-y-1/2 h-2.5 rounded-full"
+                  style={{
+                    left: Math.min(xPx(r.span.start!), xPx(r.span.end!)),
+                    width: Math.abs(xPx(r.span.end!) - xPx(r.span.start!)),
+                    background: legend.barColor,
+                    zIndex: 1
+                  }}
+                  title={`${r.project.name}: ${fmt(r.span.start!)} → ${fmt(r.span.end!)}`}
+                />
+                {/* milestones (every entry, no collapsing) */}
+                {ALL_TYPES.map((mt) =>
+                  r.datesByType[mt].map((d, i) => (
+                    <Milestone key={r.project.id + mt + i + d.toISOString()} x={xPx(d)} type={mt} legend={legend} date={d} />
+                  ))
+                )}
+              </div>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -584,7 +645,10 @@ function TimelineView({
 }
 
 function labelForTick(d: Date, g: Granularity) {
-  if (g === 'weeks') { const wk = Math.ceil(d.getDate() / 7); return `${d.getFullYear()}-${(d.getMonth()+1).toString().padStart(2,'0')} W${wk}` }
+  if (g === 'weeks') {
+    const wk = weekIndexOfMonthSun(d)
+    return `${d.getFullYear()}-${(d.getMonth()+1).toString().padStart(2,'0')} W${wk}`
+  }
   if (g === 'months') return `${d.getFullYear()}-${(d.getMonth()+1).toString().padStart(2,'0')}`
   if (g === 'quarters') return `Q${Math.floor(d.getMonth()/3)+1} ${d.getFullYear()}`
   return `${d.getFullYear()}`
@@ -592,17 +656,16 @@ function labelForTick(d: Date, g: Granularity) {
 
 function Milestone({ x, type, legend, date }:
   { x: number, type: MilestoneType, legend: LegendSettings, date: Date }) {
-  const style: React.CSSProperties = {
-    position: 'absolute', left: x + '%', top: '50%',
-    transform: 'translate(-50%, -50%)', color: legend.milestone[type].color
-  }
   const sz = legend.milestone[type].size
   const fill = legend.milestone[type].color
-  const title = `${type.toUpperCase()} • ${date.toISOString().slice(0,10)}`
   const shape = legend.milestone[type].shape
-
+  const title = `${type.toUpperCase()} • ${date.toISOString().slice(0,10)}`
+  const style: React.CSSProperties = {
+    position: 'absolute', left: x, top: '50%', transform: 'translate(-50%, -50%)',
+    zIndex: 2
+  }
   return (
-    <div style={style} title={title}>
+    <div style={style} title={title} aria-label={title}>
       {shape === 'circle'   && <div style={{ width: sz, height: sz, borderRadius: '9999px', background: fill }} />}
       {shape === 'square'   && <div style={{ width: sz, height: sz, background: fill }} />}
       {shape === 'diamond'  && (
@@ -615,23 +678,6 @@ function Milestone({ x, type, legend, date }:
           <polygon points="50,0 100,100 0,100" fill={fill} />
         </svg>
       )}
-    </div>
-  )
-}
-
-function LegendInline({ legend }: { legend: LegendSettings }) {
-  return (
-    <div className="flex flex-wrap items-center gap-4 text-sm">
-      <div className="flex items-center gap-2">
-        <span className="w-10 h-2 rounded-full" style={{ background: legend.barColor }}></span>
-        <span>Project bar</span>
-      </div>
-      {ALL_TYPES.map(mt => (
-        <div key={mt} className="flex items-center gap-2">
-          <Milestone x={0} type={mt} legend={legend} date={new Date()} />
-          <span className="capitalize">{mt}</span>
-        </div>
-      ))}
     </div>
   )
 }
