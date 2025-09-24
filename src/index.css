@@ -2,9 +2,30 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Shared UI helpers (unchanged look & feel) */
-:root { --pm-accent: #0ea5e9; }
-body { @apply text-slate-800; }
+/* ---------- THEME TOKENS ---------- */
+:root {
+  --banner-from: #3b82f6;  /* blue */
+  --banner-to:   #8b5cf6;  /* purple */
+  --page-bg:     #f3e8ff;  /* light lavender */
+  --tab-bg:      #7c3aed;  /* purple */
+  --tab-active:  #5b21b6;  /* darker purple */
+  --tab-text:    #ffffff;
+  --tab-border:  #ffffff;
+}
+
+.theme-earth {
+  --banner-from: #9ea37e;  /* sage */
+  --banner-to:   #c07a5a;  /* terracotta */
+  --page-bg:     #efe9e5;  /* warm pale clay */
+  --tab-bg:      #a07e6a;  /* dusty rose/brown */
+  --tab-active:  #7f6353;  /* darker */
+  --tab-text:    #ffffff;
+  --tab-border:  #ffffff;
+}
+
+/* ---------- GLOBAL ---------- */
+body { background: var(--page-bg); @apply text-slate-800; }
+
 input[type="date"], input[type="text"], select, textarea {
   @apply border rounded-md px-2 py-1 outline-none border-slate-300
          focus:ring-2 focus:ring-sky-400 focus:border-sky-400 bg-white;
@@ -16,8 +37,30 @@ button.pm {
 button.pm-outline { @apply rounded-lg px-3 py-1.5 border border-slate-300 bg-white hover:bg-slate-50; }
 .badge { @apply inline-block rounded-full px-2 py-0.5 text-xs font-medium bg-slate-100 border border-slate-200; }
 
-/* Timeline layout tweaks */
+/* ---------- BANNER ---------- */
+.banner {
+  background: linear-gradient(90deg, var(--banner-from), var(--banner-to));
+  color: #fff;
+}
+.banner h1 { @apply text-4xl font-extrabold text-center; }
+.banner p  { @apply text-center opacity-90; }
+
+/* ---------- TABS ---------- */
+.tab {
+  background: var(--tab-bg);
+  color: var(--tab-text);
+  border: 1px solid var(--tab-border);
+  @apply rounded-xl px-4 py-2;
+}
+.tab-active {
+  background: var(--tab-active);
+  color: var(--tab-text);
+  border: 1px solid var(--tab-border);
+  @apply rounded-xl px-4 py-2;
+}
+
+/* ---------- TIMELINE LAYOUT ---------- */
 .tl-name-cell { @apply h-14 flex items-center pl-2 border-b border-slate-200 bg-white; }
-.tl-scale { @apply relative h-10 bg-slate-100; }
-.tl-row { @apply relative h-14 border-t border-slate-100; }
-.tl-scroll { @apply overflow-x-auto; }
+.tl-scale     { @apply relative h-10 bg-slate-100; }
+.tl-row       { @apply relative h-14 border-t border-slate-100; }
+.tl-scroll    { @apply overflow-x-auto; }
